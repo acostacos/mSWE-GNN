@@ -101,7 +101,7 @@ def main(config):
                     'temporal_test_dataset_parameters': temporal_test_dataset_parameters}
     
     if 'saved_model' in config:
-        model = plmodule.load_from_checkpoint(config['saved_model'], map_location=device, **plmodule_kwargs)
+        model = LightningTrainer.load_from_checkpoint(config['saved_model'], map_location=device, **plmodule_kwargs)
 
     # Define trainer
     trainer = L.Trainer(accelerator="auto", devices='auto',
@@ -119,7 +119,7 @@ def main(config):
     trainer.fit(plmodule, pldatamodule)
 
     # Load the best model checkpoint
-    plmodule = plmodule.load_from_checkpoint(checkpoint_callback.best_model_path, map_location=device, **plmodule_kwargs)
+    plmodule = LightningTrainer.load_from_checkpoint(checkpoint_callback.best_model_path, map_location=device, **plmodule_kwargs)
     model = plmodule.model.to(device)
     
     # validate with trained model
@@ -185,6 +185,11 @@ def main(config):
 if __name__ == '__main__':
     # Read configuration file with parameters
     cfg = read_config('config.yaml')
+
+    wandb.init(
+        config=cfg,
+        mode='offline',
+    )
 
     wandb_logger = WandbLogger(
         log_model=True,

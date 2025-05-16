@@ -8,3 +8,15 @@ __pycache__
 *.pyc
 lightning_logs
 wandb
+
+database/raw_datasets_dk15/*
+!database/raw_datasets_dk15/overview.csv
+
+database/raw_datasets_mesh/*
+!database/raw_datasets_mesh/overview.csv
+
+slurm-*.out
+slurm_logs/
+saved_metrics/
+venv/
+!requirements.txt

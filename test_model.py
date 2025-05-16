@@ -69,7 +69,7 @@ def main(config):
                        'trainer_options': trainer_options, 
                        'temporal_test_dataset_parameters': temporal_test_dataset_parameters}
 
-    model = plmodule.load_from_checkpoint(config.saved_model, map_location=device, **plmodule_kwargs)
+    model = LightningTrainer.load_from_checkpoint(config.saved_model, map_location=device, **plmodule_kwargs)
     model = plmodule.model.to(device)    
 
     # Numerical simulation times
