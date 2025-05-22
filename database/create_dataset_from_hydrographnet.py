@@ -5,9 +5,9 @@ import torch
 from tqdm import tqdm
 from typing import Optional, Union
 from scipy.spatial import KDTree
-from graph_creation import create_dataset_folders, save_database, Mesh, MultiscaleMesh
+from graph_creation import create_dataset_folders, save_database,\
+    add_ghost_cells_mesh, add_ghost_cells_attributes, Mesh, MultiscaleMesh
 from torch_geometric.data import Data
-from meshkernel import Mesh2d
 
 def load_constant_data(folder: str, prefix: str,
                         norm_stats_static: Optional[dict] = None):
@@ -227,134 +227,123 @@ def process_dataset(data_dir: str,
         'dynamic_stats': dynamic_stats,
     }
 
-def create_meshkernel_mesh(xy_coords: np.ndarray):
-    node_x = xy_coords[:, 0]
-    node_y = xy_coords[:, 1]
-    return Mesh2d(node_x=node_x, node_y=node_y)
-
 def convert_to_pyg(dataset_features: dict,
-                   netcdf_file,
-                   DEM_file,
-                   BC,
-                   polygon_file=None,
                    type_BC=2,
                    with_multiscale=False,
                    number_of_multiscales=4):
     data = Data()
 
-    # WD = dataset_features['water_depth']
-    # VX = dataset_features['velocity_x']
-    # VY = dataset_features['velocity_y']
+    # Extract features from the dataset
+    WD = dataset_features['water_depth'].T
+    VX = dataset_features['cell_velocity_x'].T
+    VY = dataset_features['cell_velocity_y'].T
+    DEM = dataset_features['dem']
+    xy_coords = dataset_features['pos']
+    edge_index = dataset_features['edge_index']
+    edge_distance = dataset_features['edge_distance']
+    edge_relative_distance = dataset_features['edge_relative_distance']
+    area = dataset_features['area']
 
-    # mesh = Mesh()
-    # # TODO: Fix implementation of this
+    mesh = Mesh()
 
+    # Add ghost cells to the mesh
+    FACE_BC_IDX = 4301
+    mesh.face_BC = np.array([FACE_BC_IDX]) # Add approximate face BC for HydroGraphNet dataset
 
-    # # Create base mesh
-    # '''
-    #     node_x: np.array, shape (num_nodes,)
-    #         x coordinates of each node
-    #     node_y: np.array, shape (num_nodes,)
-    #         y coordinates of each node
-    #     face_x: np.array, shape (num_faces,)
-    #         x coordinates of each face
-    #     face_y: np.array, shape (num_faces,)
-    #         y coordinates of each face
-    #     edge_index: np.array, shape (2, num_edges)
-    #         index of connected nodes
-    #     edge_type: np.array, shape (num_edges,)
-    #         type of each edge (1:normal edges, 2:edge with boundary condition, 3:other boundary edges)
-    #     dual_edge_index: np.array, shape (2, num_dual_edges)
-    #         index of connected faces
-    #         dual_edge_index: removes the edges that are in the boundary but with no boundary conditions
+    ghost_cell_id = edge_index.max() + 1
+    ghost_cell_edge_index = np.array([ghost_cell_id, FACE_BC_IDX])[:, None] # Undirected edge
+    ghost_cell_x = xy_coords[FACE_BC_IDX][0] + 100
+    ghost_cell_y = xy_coords[FACE_BC_IDX][0]
+    ghost_cell_area = np.zeros((1)) # See if this is 0 or the area of another face
 
-    #     face_nodes: np.array, shape (num_faces*nodes_per_face,)
-    #         index of the nodes that define each face
-    #     nodes_per_face: np.array, shape (num_faces,)
-    #         number of nodes that define each face
+    xy_coords = np.concatenate((xy_coords, np.array([[ghost_cell_x, ghost_cell_y]])), axis=0)
+    edge_index = np.concatenate((edge_index, ghost_cell_edge_index), axis=1)
+    area = np.concatenate((area, ghost_cell_area), axis=0)
 
+    ghost_cell_relative_distance = xy_coords[ghost_cell_edge_index[1,:]] - xy_coords[ghost_cell_edge_index[0,:]]
+    ghost_cell_distance = np.linalg.norm(ghost_cell_relative_distance, axis=1)
+    edge_distance = np.concatenate((edge_distance, ghost_cell_distance), axis=0)
+    edge_relative_distance = np.concatenate((edge_relative_distance, ghost_cell_relative_distance), axis=0)
 
-    #     edge_index_BC: np.array, shape (num_edges_BC, 2)
-    #         index of the edges that have boundary conditions
-    #     face_BC: np.array, shape (num_faces_BC,)
-    #         index of the faces that have boundary conditions
-    #     edge_BC: np.array, shape (num_edges_BC,)
-    #         index of the edges that have boundary conditions
-    #     extra_face_BC: np.array, shape (num_extra_faces_BC,)
-    #         index of the faces that are in the boundary but with no boundary conditions
-    # '''
-    
+    mesh.dual_edge_index_BC = ghost_cell_edge_index
+    mesh.ghost_cells_ids = np.array([ghost_cell_id])
+    mesh.added_ghost_cells = True
 
-    # mesh._import_from_map_netcdf(netcdf_file)
-    # mesh._import_DEM(DEM_file)
-    # DEM = mesh.DEM
-    # mesh = add_ghost_cells_mesh(mesh)
+    # Populate mesh values
+    mesh.face_x = xy_coords[:, 0]
+    mesh.face_y = xy_coords[:, 1]
+    mesh.DEM = DEM
+    mesh.dual_edge_index = edge_index
+    mesh.dual_edge_length = edge_distance
+    mesh.face_relative_distance = edge_relative_distance
+    mesh.face_area = area
 
-    # if with_multiscale:
-    #     # Want to generate lower resolution meshes from HydroGraphNet mesh
-    #     # merge_distance = 5.0  # distance in mesh units
-    #     # mk.mesh2d_merge_nodes(merge_distance)
+    if with_multiscale:
+        pass
+        # Want to generate lower resolution meshes from HydroGraphNet mesh
+        # merge_distance = 5.0  # distance in mesh units
+        # mk.mesh2d_merge_nodes(merge_distance)
 
 
-    #     assert polygon_file is not None, 'polygon_file must be provided if with_multiscale is True'
-    #     # create multiscale meshes
-    #     meshes = create_mesh_dhydro(polygon_file, number_of_multiscales-1, for_simulation=False)
-    #     meshes.append(copy(meshes[0]))
-    #     meshes[-1]._import_from_map_netcdf(netcdf_file)
-    #     meshes[-1].edge_outward_normal[meshes[-1].edge_BC] *= -1  # reverse the normal of the boundary edges
-    #     meshes = meshes[::-1]
+        # assert polygon_file is not None, 'polygon_file must be provided if with_multiscale is True'
+        # # create multiscale meshes
+        # meshes = create_mesh_dhydro(polygon_file, number_of_multiscales-1, for_simulation=False)
+        # meshes.append(copy(meshes[0]))
+        # meshes[-1]._import_from_map_netcdf(netcdf_file)
+        # meshes[-1].edge_outward_normal[meshes[-1].edge_BC] *= -1  # reverse the normal of the boundary edges
+        # meshes = meshes[::-1]
 
-    #     # Add boundary conditions to multiscale meshes
-    #     edge_BC_mid = mesh.node_xy[mesh.edge_index_BC].mean(1)
-    #     meshes = interpolate_BC_location_multiscale(meshes, edge_BC_mid)
-    #     meshes = [add_ghost_cells_mesh(mesh) for mesh in meshes]
-    #     DEM, WD, VX, VY = add_ghost_cells_attributes(meshes[0], DEM, WD, VX, VY)
+        # # Add boundary conditions to multiscale meshes
+        # edge_BC_mid = mesh.node_xy[mesh.edge_index_BC].mean(1)
+        # meshes = interpolate_BC_location_multiscale(meshes, edge_BC_mid)
+        # meshes = [add_ghost_cells_mesh(mesh) for mesh in meshes]
+        # DEM, WD, VX, VY = add_ghost_cells_attributes(meshes[0], DEM, WD, VX, VY)
 
-    #     # create multiscale mesh
-    #     mesh = MultiscaleMesh()
-    #     mesh.stack_meshes(meshes)
+        # # create multiscale mesh
+        # mesh = MultiscaleMesh()
+        # mesh.stack_meshes(meshes)
 
-    #     data.node_ptr = torch.LongTensor(mesh.face_ptr)
-    #     data.edge_ptr = torch.LongTensor(mesh.dual_edge_ptr)
-    #     data.intra_edge_ptr = torch.LongTensor(mesh.intra_edge_ptr)
-    #     data.intra_mesh_edge_index = torch.LongTensor(mesh.intra_mesh_dual_edge_index)
+        # data.node_ptr = torch.LongTensor(mesh.face_ptr)
+        # data.edge_ptr = torch.LongTensor(mesh.dual_edge_ptr)
+        # data.intra_edge_ptr = torch.LongTensor(mesh.intra_edge_ptr)
+        # data.intra_mesh_edge_index = torch.LongTensor(mesh.intra_mesh_dual_edge_index)
         
-    #     # get multiscale attributes
-    #     # mesh.DEM, WD, VX, VY = interpolate_multiscale_attributes(meshes, DEM, WD, VX, VY, method='nearest')
-    #     mesh.DEM, WD, VX, VY = pool_multiscale_attributes(mesh, DEM, WD, VX, VY, reduce='mean')
-    #     mesh.DEM = update_ghost_cells_attributes(mesh, mesh.DEM)[0] #correct ghost cells values after pooling
-    # else:
-    #     mesh.DEM, WD, VX, VY = add_ghost_cells_attributes(mesh, mesh.DEM, WD, VX, VY)
-    # # slope_x, slope_y = get_slopes(mesh.face_xy, mesh.DEM, neighborhood_size=neighborhood_size_slope, 
-    # #                                   min_neighbours=min_neighbours_slope)
-    
-    # data.DEM = torch.FloatTensor(mesh.DEM)
-    # data.WD = torch.FloatTensor(WD)
-    # data.VX = torch.FloatTensor(VX)
-    # data.VY = torch.FloatTensor(VY)
-    # # data.slopex = torch.FloatTensor(slope_x)
-    # # data.slopey = torch.FloatTensor(slope_y)
-    
-    # # Assign other data properties
-    # data.edge_index = torch.LongTensor(mesh.dual_edge_index)
-    # data.face_distance = torch.FloatTensor(mesh.dual_edge_length)
-    # data.face_relative_distance = torch.FloatTensor(mesh.face_relative_distance)
-    # data.edge_slope = (data.DEM[data.edge_index][0] - data.DEM[data.edge_index][1])/data.face_distance
-    # # data.normal = torch.FloatTensor(mesh.edge_outward_normal[mesh.edge_type < 3])
-    # data.num_nodes = mesh.face_x.shape[0]
-    # data.area = torch.FloatTensor(mesh.face_area)
+        # # get multiscale attributes
+        # # mesh.DEM, WD, VX, VY = interpolate_multiscale_attributes(meshes, DEM, WD, VX, VY, method='nearest')
+        # mesh.DEM, WD, VX, VY = pool_multiscale_attributes(mesh, DEM, WD, VX, VY, reduce='mean')
+        # mesh.DEM = update_ghost_cells_attributes(mesh, mesh.DEM)[0] #correct ghost cells values after pooling
+    else:
+        mesh.DEM, WD, VX, VY = add_ghost_cells_attributes(mesh, mesh.DEM, WD, VX, VY)
+    # slope_x, slope_y = get_slopes(mesh.face_xy, mesh.DEM, neighborhood_size=neighborhood_size_slope, 
+    #                                   min_neighbours=min_neighbours_slope)
 
-    # data.mesh = mesh
-    
-    # data.node_BC = torch.IntTensor(mesh.ghost_cells_ids)
-    # data.edge_BC_length = torch.FloatTensor(mesh.edge_length[mesh.edge_BC])
-    # if with_multiscale:
-    #     data.node_BC = data.node_BC[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC only at the finest scale
-    #     data.edge_BC_length = data.edge_BC_length[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC+edge only at the finest scale
+    data.DEM = torch.FloatTensor(mesh.DEM)
+    data.WD = torch.FloatTensor(WD)
+    data.VX = torch.FloatTensor(VX)
+    data.VY = torch.FloatTensor(VY)
+    # data.slopex = torch.FloatTensor(slope_x)
+    # data.slopey = torch.FloatTensor(slope_y)
+
+    # Assign other data properties
+    data.edge_index = torch.LongTensor(mesh.dual_edge_index)
+    data.face_distance = torch.FloatTensor(mesh.dual_edge_length)
+    data.face_relative_distance = torch.FloatTensor(mesh.face_relative_distance)
+    data.edge_slope = (data.DEM[data.edge_index][0] - data.DEM[data.edge_index][1])/data.face_distance
+    # data.normal = torch.FloatTensor(mesh.edge_outward_normal[mesh.edge_type < 3])
+    data.num_nodes = mesh.face_x.shape[0]
+    data.area = torch.FloatTensor(mesh.face_area)
+
+    data.mesh = mesh
+
+    data.node_BC = torch.IntTensor(mesh.ghost_cells_ids)
+    data.edge_BC_length = torch.FloatTensor(mesh.edge_length[mesh.edge_BC])
+    if with_multiscale:
+        data.node_BC = data.node_BC[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC only at the finest scale
+        data.edge_BC_length = data.edge_BC_length[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC+edge only at the finest scale
     # data.BC = torch.FloatTensor(BC).unsqueeze(0).repeat(len(data.node_BC), 1, 1) # This repeats the same BC
-    # data.type_BC = torch.tensor(type_BC, dtype=torch.int)
+    data.type_BC = torch.tensor(type_BC, dtype=torch.int)
 
-    # return data
+    return data
 
     # data = Data()
 
@@ -382,8 +371,8 @@ def main():
     train_ids_file = '0_train.txt'
     test_ids_file = '0_test.txt'
 
-    create_dataset_folders(dataset_folder=dataset_folder)
-    print(f"Dataset folder created in: {dataset_folder}", flush=True)
+    # create_dataset_folders(dataset_folder=dataset_folder)
+    # print(f"Dataset folder created in: {dataset_folder}", flush=True)
 
     # ============= Create train dataset =============
     train_processed = process_dataset(
@@ -394,35 +383,36 @@ def main():
         split="train",
     )
 
-    # constant_dataset_features = {
-    #     'edge_index': train_processed['edge_index'],
-    #     'edge_distance': train_processed['edge_distance'],
-    #     'edge_relative_distance': train_processed['edge_relative_distance'],
-    #     'num_nodes': train_processed['num_nodes'],
-    #     'pos': train_processed['xy_coords'],
-    #     'dem': train_processed['elevation'].squeeze(),
-    #     # Temporary workaround: slope_x and slope_y are just the cell slope value.
-    #     'slope_x': train_processed['slope'].squeeze(),
-    #     'slope_y': train_processed['slope'].squeeze(),
-    # }
+    constant_dataset_features = {
+        'edge_index': train_processed['edge_index'],
+        'edge_distance': train_processed['edge_distance'],
+        'edge_relative_distance': train_processed['edge_relative_distance'],
+        'num_nodes': train_processed['num_nodes'],
+        'pos': train_processed['xy_coords'],
+        'dem': train_processed['elevation'].squeeze(),
+        'area': train_processed['area'].squeeze(),
+        # Temporary workaround: slope_x and slope_y are just the cell slope value.
+        'slope_x': train_processed['slope'].squeeze(),
+        'slope_y': train_processed['slope'].squeeze(),
+    }
 
-    # grid_dataset = []
-    # for i, key in enumerate(train_processed['hydrograph_ids']):
-    #     print(f"Processing training event {key}", flush=True)
+    grid_dataset = []
+    for i, key in enumerate(train_processed['hydrograph_ids']):
+        print(f"Processing training event {key}", flush=True)
 
-    #     paths = train_processed['dynamic_data'][i]
-    #     water_depth = paths['water_depth']
-    #     velocity_x = paths['velocity_x']
-    #     velocity_y = paths['velocity_y']
+        paths = train_processed['dynamic_data'][i]
+        water_depth = paths['water_depth']
+        velocity_x = paths['velocity_x']
+        velocity_y = paths['velocity_y']
 
-    #     dataset_features = {
-    #         **constant_dataset_features,
-    #         'water_depth': water_depth,
-    #         'cell_velocity_x': velocity_x,
-    #         'cell_velocity_y': velocity_y,
-    #     }
-    #     pyg_dataset = convert_to_pyg(dataset_features)
-    #     grid_dataset.append(pyg_dataset)
+        dataset_features = {
+            **constant_dataset_features,
+            'water_depth': water_depth,
+            'cell_velocity_x': velocity_x,
+            'cell_velocity_y': velocity_y,
+        }
+        pyg_dataset = convert_to_pyg(dataset_features)
+        grid_dataset.append(pyg_dataset)
     # print('Saving training dataset', flush=True)
     # save_database(grid_dataset, name='hydrographnet', out_path=f"{dataset_folder}/train")
 
