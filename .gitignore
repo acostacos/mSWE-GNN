@@ -20,3 +20,4 @@ slurm_logs/
 saved_metrics/
 venv/
 !requirements.txt
+!requirements_windows.txt
