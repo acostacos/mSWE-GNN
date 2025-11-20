@@ -27,3 +27,5 @@ tqdm==4.66.1
 UGrid==0.13.0
 wandb==0.15.12
 xarray==2023.10.1
+geopandas==1.0.1
+triangle==20250106
