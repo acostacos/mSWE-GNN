@@ -3,6 +3,7 @@ import networkx as nx
 import triangle as tr
 import os
 import matplotlib as mpl
+import geopandas as gpd
 from matplotlib.collections import PatchCollection
 from matplotlib.path import Path
 from typing import List, Tuple
@@ -11,16 +12,19 @@ from tqdm import tqdm
 from copy import copy
 import matplotlib.pyplot as plt
 from sklearn.neighbors import kneighbors_graph, radius_neighbors_graph
+from sklearn.cluster import KMeans
 from scipy.linalg import lstsq
 from scipy.interpolate import griddata
 import torch
 from torch_geometric.data import Data
 from torch_geometric.utils import to_undirected
 from torch_geometric.utils import scatter
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
+from shapely.ops import unary_union
 import xarray as xr
 from meshkernel import MeshKernel, Mesh2d, GeometryList, OrthogonalizationParameters, ProjectToLandBoundaryOption, MeshRefinementParameters
 from meshkernel import py_structures, DeleteMeshOption
+from hecras_mesh_data import HECRASMeshData
 
 def center_grid_graph(dim1, dim2, grid_size=1):
     '''
@@ -527,6 +531,179 @@ def create_mesh_dhydro(polygon_file='random_polygon.pol', number_of_multiscales=
     else:
         return meshes
 
+def create_hecras_multiscale_mesh(mesh_data: HECRASMeshData,
+                                  coarsening_factor: float,
+                                  number_of_multiscales: int,
+                                  random_state: int = 42) -> list[HECRASMeshData]:
+    multiscale_meshes = [mesh_data]
+    current_mesh = mesh_data
+    for _ in range(number_of_multiscales):
+        coarse_mesh = create_coarse_mesh_cluster(
+            mesh_data=current_mesh,
+            coarsening_factor=coarsening_factor,
+            random_state=random_state,
+        )
+        multiscale_meshes.append(coarse_mesh)
+        current_mesh = coarse_mesh
+    return multiscale_meshes
+
+def create_coarse_mesh_cluster(mesh_data: HECRASMeshData,
+                               coarsening_factor=0.5,
+                               random_state=42,
+                               n_init=10):
+    n_original = len(mesh_data.face_x)
+
+    assert isinstance(coarsening_factor, float) and 0 < coarsening_factor < 1, \
+        "coarsening_factor must be a float value between 0 and 1 representing the fraction of nodes to retain"
+    n_coarse = max(3, int(n_original * coarsening_factor))
+    print(f"Coarsening mesh from {n_original} to {n_coarse} faces (factor: {coarsening_factor})")
+
+    # ==================== CREATE COARSE FACE CENTERS ======================
+    face_center_coords = np.column_stack([mesh_data.face_x, mesh_data.face_y])
+    kmeans = KMeans(n_clusters=n_coarse, random_state=random_state, n_init=n_init)
+    cluster_labels = kmeans.fit_predict(face_center_coords)
+    coarse_face_centers = kmeans.cluster_centers_
+
+    # ===================== CREATE COARSE FACE NODES =======================
+    # Map each mesh face center to its respective mesh face
+    face_edges_gdf = mesh_data.to_faces_gdf()
+    mesh_cells = face_edges_gdf.polygonize()
+    spatial_index = mesh_cells.sindex
+    matched_polygons = []
+    for x, y in face_center_coords:
+        center_point = Point((x, y))
+        # Get candidate polygons using spatial index
+        possible_matches_idx = list(spatial_index.intersection(center_point.bounds))
+        possible_matches = mesh_cells.iloc[possible_matches_idx]
+        # Find which polygon actually contains the point
+        match_found = False
+        for poly_geom in possible_matches.geometry:
+            if poly_geom.contains(center_point):
+                matched_polygons.append(poly_geom)
+                match_found = True
+                break
+        assert match_found, f"No containing polygon found for node at {center_point}"
+    mesh_cell_gdf = gpd.GeoDataFrame({
+        'face_id': range(n_original),
+        'cluster': cluster_labels,
+    }, geometry=matched_polygons)
+
+    # Find cluster boundaries and create shared nodes
+    node_coords_dict = {}  # Maps (x, y) tuple to node index
+    coarse_node_list = []
+    cluster_boundary_nodes = {}  # Maps cluster_id to list of boundary node indices
+
+    # Track original mesh boundary nodes
+    original_boundary_nodes = set()
+    if mesh_data.edge_type is not None:
+        boundary_edge_mask = mesh_data.edge_type > 1
+        boundary_edges = mesh_data.edge_index[:, boundary_edge_mask]
+        original_boundary_nodes = set(boundary_edges.flatten())
+
+    # Create nodes for each cluster
+    for cluster_id in range(n_coarse):
+        cluster_cells = mesh_cell_gdf[mesh_cell_gdf['cluster'] == cluster_id]
+
+        # Merge polygons in cluster
+        combined_polygon = unary_union(cluster_cells.geometry.tolist())
+        assert combined_polygon.geom_type == 'Polygon', \
+            f"Cluster {cluster_id} is disconnected (MultiPolygon). Consider different clustering parameters."
+
+        # Extract boundary coordinates
+        boundary_coords = list(combined_polygon.exterior.coords)[:-1]
+
+        cluster_nodes = []
+        for x, y in boundary_coords:
+            coord_key = (round(x, 6), round(y, 6)) # Round to avoid floating point issues
+
+            # Reuse existing node if coordinates match (shared boundary)
+            if coord_key not in node_coords_dict:
+                node_idx = len(coarse_node_list)
+                node_coords_dict[coord_key] = node_idx
+                coarse_node_list.append([x, y])
+            else:
+                node_idx = node_coords_dict[coord_key]
+
+            cluster_nodes.append(node_idx)
+
+        cluster_boundary_nodes[cluster_id] = cluster_nodes
+
+    # ===================== CREATE COARSE FACE EDGES =======================
+    # TODO: Fix logic for this one
+    coarse_edges_list = []
+    coarse_edge_types = []
+
+    for cluster_id in range(n_coarse):
+        cluster_nodes = cluster_boundary_nodes[cluster_id]
+        n_nodes = len(cluster_nodes)
+
+        for i in range(n_nodes):
+            from_idx = cluster_nodes[i]
+            to_idx = cluster_nodes[(i + 1) % n_nodes]
+            edge = tuple(sorted([from_idx, to_idx]))
+            coarse_edges_list.append([from_idx, to_idx])
+            coarse_edge_types.append(1)
+
+    # Remove duplicate edges (shared between clusters should only appear once)
+    unique_edges = {}
+    for edge, edge_type in zip(coarse_edges_list, coarse_edge_types):
+        edge_tuple = tuple(sorted(edge))
+        if edge_tuple not in unique_edges:
+            unique_edges[edge_tuple] = edge_type
+
+    # Rebuild edge lists with original orientation
+    final_edges_list = []
+    final_edge_types = []
+    edge_set = set()
+
+    for edge, edge_type in zip(coarse_edges_list, coarse_edge_types):
+        edge_sorted = tuple(sorted(edge))
+        if edge_sorted not in edge_set:
+            edge_set.add(edge_sorted)
+            final_edges_list.append(edge)
+            final_edge_types.append(edge_type)
+
+    # =================== CREATE COARSE FACE DUAL EDGES ====================
+    neighbor_pairs = set()
+    for link_idx in range(mesh_data.dual_edge_index.shape[1]):
+        from_face, to_face = mesh_data.dual_edge_index[:, link_idx]
+        
+        if from_face >= 0 and to_face >= 0:  # Skip boundary dual edges
+            from_cluster = cluster_labels[from_face]
+            to_cluster = cluster_labels[to_face]
+            
+            if from_cluster != to_cluster:
+                neighbor_pairs.add(tuple(sorted([from_cluster, to_cluster])))
+
+    coarse_dual_edges_list = [[c1, c2] for c1, c2 in neighbor_pairs]
+
+    # ==================== COARSE HECRAS MESH OBJECT ======================
+    coarse_nodes = np.array(coarse_node_list)
+    coarse_node_x = coarse_nodes[:, 0]
+    coarse_node_y = coarse_nodes[:, 1]
+    coarse_edge_index = np.array(final_edges_list).T if final_edges_list else np.zeros((2, 0), dtype=int)
+    coarse_edge_type = np.array(final_edge_types, dtype=int) if final_edge_types else np.array([], dtype=int)
+    coarse_face_x = coarse_face_centers[:, 0]
+    coarse_face_y = coarse_face_centers[:, 1]
+    coarse_dual_edge_index = np.array(coarse_dual_edges_list).T if coarse_dual_edges_list else np.zeros((2, 0), dtype=int)
+
+    print(f"Created coarse mesh: {len(coarse_node_x)} nodes, {coarse_edge_index.shape[1]} edges, "
+          f"{len(coarse_face_x)} faces, {coarse_dual_edge_index.shape[1]} dual edges")
+
+    coarse_mesh_data = HECRASMeshData(
+        node_x=coarse_node_x,
+        node_y=coarse_node_y,
+        edge_index=coarse_edge_index,
+        edge_type=coarse_edge_type,
+        face_x=coarse_face_x,
+        face_y=coarse_face_y,
+        dual_edge_index=coarse_dual_edge_index,
+        face_nodes=None
+    )
+
+    return coarse_mesh_data
+
+
 def get_face_nodes_mesh(mesh):
     num_faces = mesh.face_x.shape[0]
     max_nodes_per_face = mesh.nodes_per_face.max()
@@ -771,6 +948,39 @@ class Mesh(object):
                                         ).reshape(-1, 2).T  # shape [2, E_d]
         self.dual_edge_index = to_undirected(torch.LongTensor(dual_edge_index)).numpy() #convert to undirected graph
         self.boundary_nodes = mesh['vertex_markers']
+    
+    def _import_from_hecras_data(self, hecras_data: HECRASMeshData):
+        self.node_x = hecras_data.node_x
+        self.node_y = hecras_data.node_y
+        self.face_x = hecras_data.face_x
+        self.face_y = hecras_data.face_y
+        self.edge_index = hecras_data.edge_index
+        self.edge_type = hecras_data.edge_type
+        self.dual_edge_index = hecras_data.dual_edge_index
+        self.face_nodes = hecras_data.face_nodes
+
+        # TODO: Check this
+        if isinstance(self.face_nodes.to_masked_array().mask, np.ndarray):
+            self.nodes_per_face = (~self.face_nodes.to_masked_array().mask).sum(1).astype(int)
+            self.face_nodes = self.face_nodes.data[~self.face_nodes.to_masked_array().mask].astype(int)
+        else:
+            self.nodes_per_face = np.ones_like(self.face_nodes).sum(1).data.astype(int)
+            self.face_nodes = self.face_nodes.reshape(-1).data.astype(int)
+
+        self.edge_index_BC = self.edge_index[:,self.edge_type == 2].T
+        self.boundary_edges = self.edge_index[:,self.edge_type > 1].T
+        self.edge_BC = np.stack([np.where((edge==self.edge_index.T).sum(1) == 2) for edge in self.edge_index_BC]).reshape(-1)
+
+        face_bnd_mask = self.dual_edge_index[0,:] == -1
+        self.face_BC = self.dual_edge_index[1,face_bnd_mask]
+
+        extra_face_bnd_mask = self.dual_edge_index[1,:] == -1
+        self.face_bnd = self.dual_edge_index[0,extra_face_bnd_mask]
+
+        total_face_bnd_mask = extra_face_bnd_mask | face_bnd_mask
+        self.dual_edge_index = self.dual_edge_index[:,~total_face_bnd_mask]
+        self.dual_edge_index = to_undirected(torch.LongTensor(self.dual_edge_index)).numpy() #convert to undirected graph
+        self._get_derived_attributes()
 
     def _get_derived_attributes(self):
         """Calculate derived attributes from the mesh
