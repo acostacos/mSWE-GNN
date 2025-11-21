@@ -1,39 +1,38 @@
 import numpy as np
-import h5py
 import geopandas as gpd
 from dataclasses import dataclass
+
+from collections import OrderedDict
 from shapely.geometry import Point, LineString
 from shapely.ops import unary_union
-
-def extract_ghost_nodes(hecras_path: str, nodes_gdf: gpd.GeoDataFrame) -> np.ndarray:
-    with h5py.File(hecras_path, 'r') as hec:
-        min_elevation = np.array(hec['Geometry']['2D Flow Areas']['Perimeter 1']['Cells Minimum Elevation'])
-    ghost_cells_idx = np.where(np.isnan(min_elevation))[0]
-    for cell_idx in ghost_cells_idx:
-        assert cell_idx in nodes_gdf.index, f"Ghost cell index {cell_idx} not found in nodes GeoDataFrame."
-    return ghost_cells_idx
+from typing import Tuple, Optional
 
 @dataclass
 class HECRASMeshData:
-    node_x: np.ndarray                # x-coordinates of mesh vertices
-    node_y: np.ndarray                # y-coordinates of mesh vertices
-    edge_index: np.ndarray            # connectivity of edges between vertices
-    edge_type: np.ndarray             # type of each edge (1: normal, 2: boundary condition edge, 3: other boundary edges)
+    # Mesh data for mapping
+    # Directly from HECRAS and shapefiles
+    face_x: np.ndarray                              # x-coordinates of face centers (nodes in graph)
+    face_y: np.ndarray                              # y-coordinates of face centers (nodes in graph)
+    dual_edge_index: np.ndarray                     # connectivity of dual edges between face centers (edges in graph)
 
-    face_x: np.ndarray                # x-coordinates of face centers (nodes in graph)
-    face_y: np.ndarray                # y-coordinates of face centers (nodes in graph)
-    dual_edge_index: np.ndarray       # connectivity of dual edges between face centers (edges in graph)
-    face_nodes: np.ndarray = None     # List of nodes (vertices) that make up each face
+    # Derived mesh attributes
+    node_x: np.ndarray                              # x-coordinates of mesh vertices
+    node_y: np.ndarray                              # y-coordinates of mesh vertices
+    edge_index: np.ndarray                          # connectivity of edges between vertices
+    edge_type: np.ndarray                           # type of each edge in edge_index (1: normal, 2: boundary condition edge, 3: other boundary edges)
+    face_nodes: np.ndarray                          # List of nodes (vertices) that make up each face
+
+    # HECRAS specific data
+    inflow_bc_gdf: gpd.GeoDataFrame = None          # GeoDataFrame of inflow boundary condition nodes. Contains x and y coordinates of inflow BC nodes from HECRAS.
 
     @classmethod
     def from_gdfs(cls,
                   nodes_gdf: gpd.GeoDataFrame,
                   edges_gdf: gpd.GeoDataFrame,
                   faces_gdf: gpd.GeoDataFrame,
-                  facepoints_gdf: gpd.GeoDataFrame,
                   ghost_nodes: np.ndarray = None,
                   inflow_bc_nodes: np.ndarray = None):
-        """Initialize HECRASMeshData from GeoDataFrames.
+        """Initialize HECRASMeshData from GeoDataFrames. Typically used when initially reading from raw HECRAS and shapefiles.
 
         Args:
             nodes_gdf (gpd.GeoDataFrame): GeoDataFrame containing mesh vertices.
@@ -42,160 +41,133 @@ class HECRASMeshData:
                 columns: 'link_index', 'from_node', 'to_node', 'geometry'
             faces_gdf (gpd.GeoDataFrame): GeoDataFrame containing mesh faces.
                 columns: 'face_index', 'from', 'to', 'geometry'
-            facepoints_gdf (gpd.GeoDataFrame): GeoDataFrame containing face center points.
-                columns: 'X', 'Y', 'FP_index', 'geometry'
             ghost_nodes (np.ndarray, optional): Indices of ghost nodes to exclude. Defaults to None.
             inflow_bc_nodes (np.ndarray, optional): Indices of inflow boundary condition nodes. Defaults to None.
         """
         if ghost_nodes is not None:
-            ghost_nodes_gdf = nodes_gdf[nodes_gdf['CC_index'].isin(ghost_nodes)]
-            nodes_gdf = nodes_gdf.drop(index=ghost_nodes)
+            # Only remove ghost nodes from nodes_gdf and edges_gdf; They do not affect faces_gdf
+            ghost_nodes_mask = nodes_gdf['CC_index'].isin(ghost_nodes)
+            ghost_nodes_gdf = nodes_gdf[ghost_nodes_mask]
+            nodes_gdf = nodes_gdf[~ghost_nodes_mask]
 
             ghost_edges_mask = (edges_gdf['from_node'].isin(ghost_nodes) | edges_gdf['to_node'].isin(ghost_nodes))
-            ghost_edges_gdf = edges_gdf[ghost_edges_mask]
             edges_gdf = edges_gdf[~ghost_edges_mask]
 
             if inflow_bc_nodes is not None:
                 assert inflow_bc_nodes in ghost_nodes, "Inflow boundary condition nodes must be a subset of ghost nodes."
 
-                inflow_nodes_gdf = ghost_nodes_gdf[ghost_nodes_gdf['CC_index'].isin(inflow_bc_nodes)]
-
-        node_x = facepoints_gdf['X'].to_numpy()
-        node_y = facepoints_gdf['Y'].to_numpy()
-        edge_index = faces_gdf[['from', 'to']].to_numpy().T
-
-        edge_type = HECRASMeshData.create_edge_types(
-            edge_index=edge_index,
-            node_x=node_x,
-            node_y=node_y,
-            faces_gdf=faces_gdf,
-            inflow_nodes_gdf=inflow_nodes_gdf if inflow_bc_nodes is not None else None,
-        )
+                inflow_bc_gdf = ghost_nodes_gdf[ghost_nodes_gdf['CC_index'].isin(inflow_bc_nodes)]
+                # inflow_bc_node_coords = inflow_nodes_gdf[['X', 'Y']].to_numpy()
 
         face_x = nodes_gdf['X'].to_numpy()
         face_y = nodes_gdf['Y'].to_numpy()
         dual_edge_index = edges_gdf[['from_node', 'to_node']].to_numpy().T
 
-        face_nodes = HECRASMeshData.create_face_nodes(
-            nodes_gdf=nodes_gdf,
-            faces_gdf=faces_gdf,
-            facepoints_gdf=facepoints_gdf,
-        )
-
         return cls(
-            node_x=node_x,
-            node_y=node_y,
-            edge_index=edge_index,
-            edge_type=edge_type,
             face_x=face_x,
             face_y=face_y,
             dual_edge_index=dual_edge_index,
-            face_nodes=face_nodes,
+            faces_gdf=faces_gdf,
+            inflow_bc_gdf=inflow_bc_gdf if inflow_bc_nodes is not None else None
         )
 
-    @classmethod
-    def create_edge_types(cls,
-                          edge_index: np.ndarray,
-                          node_x: np.ndarray,
-                          node_y: np.ndarray,
-                          faces_gdf: gpd.GeoDataFrame,
-                          inflow_nodes_gdf: gpd.GeoDataFrame = None) -> np.ndarray:
-        edge_type = np.ones(edge_index.shape[1], dtype=int) # Default = edge type 1
-        mesh_cells = faces_gdf.polygonize()
-        merged_polygon = unary_union(mesh_cells.to_list())
-        boundary_coords = np.array(list(merged_polygon.exterior.coords))
-        if inflow_nodes_gdf is not None:
-            inflow_coords = inflow_nodes_gdf[['X', 'Y']].to_numpy()
-            inflow_points = [Point(x, y) for x, y in inflow_coords]
+    def __init__(self,
+                 face_x: np.ndarray,
+                 face_y: np.ndarray,
+                 dual_edge_index: np.ndarray,
+                 faces_gdf: gpd.GeoDataFrame,
+                 inflow_bc_gdf: gpd.GeoDataFrame = None):
+        self.face_x = face_x
+        self.face_y = face_y
+        self.dual_edge_index = dual_edge_index
+        self.inflow_bc_gdf = inflow_bc_gdf
+        self._get_derived_attributes(faces_gdf, inflow_bc_gdf)
 
-        def is_on_boundary(px: float, py: float, tolerance: float = 1e-6) -> bool:
-            distances = np.sqrt((boundary_coords[:, 0] - px)**2 + (boundary_coords[:, 1] - py)**2)
-            return np.min(distances) < tolerance
+    def _get_derived_attributes(self, faces_gdf: gpd.GeoDataFrame, inflow_bc_gdf: Optional[gpd.GeoDataFrame]):
+        self.edge_index, self.edge_type = self._get_edge_attributes(faces_gdf, inflow_bc_gdf)
+        self.node_x, self.node_y, self.face_nodes = self._get_node_attributes(faces_gdf, self.edge_index)
+ 
+    def _get_node_attributes(self, faces_gdf: gpd.GeoDataFrame, edge_index: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        '''Create mesh node/vertex attributes: node_x, node_y, face_nodes'''
+        nodes_gdf = self.to_nodes_gdf()
+        mesh_faces = faces_gdf.polygonize()
+        assert len(mesh_faces) == len(nodes_gdf), "Number of mesh faces must equal number of face centers (nodes)."
 
-        for i in range(edge_index.shape[1]):
-            from_idx = edge_index[0, i]
-            to_idx = edge_index[1, i]
-            from_point_x, from_point_y = node_x[from_idx], node_y[from_idx]
-            to_point_x, to_point_y = node_x[to_idx], node_y[to_idx]
+        # For node_x and node_y
+        node_x = np.full(edge_index.max() + 1, np.nan)
+        node_y = np.full(edge_index.max() + 1, np.nan)
 
-            # Check if both endpoints are on the boundary
-            if not (is_on_boundary(from_point_x, from_point_y) and is_on_boundary(to_point_x, to_point_y)):
-                continue
+        # For face_nodes
+        face_nodes_list = [[] for _ in range(len(nodes_gdf))]
 
-            if inflow_nodes_gdf is not None:
-                line = LineString([(from_point_x, from_point_y), (to_point_x, to_point_y)])
-                found_inflow = False
-                for inflow_point in inflow_points:
-                    # Edges that are linked to face of inflow boundary condition = edge type 2
-                    if line.distance(inflow_point) < 1e-6:
-                        edge_type[i] = 2
-                        found_inflow = True
+        for face_idx, face in enumerate(mesh_faces):
+            assert face.geom_type == 'Polygon', f"Face {face_idx} is not a Polygon even if all faces are expected to be closed."
+
+            # Get respective face center index (node in graph)
+            face_center_matches = nodes_gdf.sindex.query(face, predicate='intersects')
+            assert len(face_center_matches) > 0, f"Face center not found for face {face_idx}."
+            if len(face_center_matches) > 1:
+                print(f"Warning : Multiple face centers found for face {face_idx} - {len(face_center_matches)} candidates.")
+            face_center_idx = face_center_matches[0]
+
+            face_vertices = list(face.exterior.coords)[:-1]  # Exclude last duplicate point
+            vertex_indices = OrderedDict()
+            for vertex_idx in range(len(face_vertices) - 1):
+                face_edge_coords = [face_vertices[vertex_idx], face_vertices[vertex_idx + 1]]
+
+                # Check which index of edge_index this edge corresponds to
+                edge_matches = faces_gdf.sindex.query(LineString(face_edge_coords), predicate='intersects')
+
+                # Filter to edges that are actually part of the polygon boundary
+                match_found = False
+                for edge_idx in edge_matches:
+                    edges_idxs = edge_index[:, edge_idx]
+                    edge_coords = list(faces_gdf.geometry.iloc[edge_idx].coords)
+                    if edge_coords == face_edge_coords[::-1]:
+                        edge_coords = edge_coords[::-1]
+                        edges_idxs = edges_idxs[::-1]
+                    if edge_coords == face_edge_coords:
+                        match_found = True
                         break
-                if found_inflow:
-                    continue
+                assert match_found, f"No matching edge found for face {face_idx} between vertices {vertex_idx} and {vertex_idx+1}."
 
-            # Edges at boundary of the mesh = edge type 3
-            edge_type[i] = 3
-        return edge_type
+                for coord_idx, coords in enumerate(face_edge_coords):
+                    node_idx = edges_idxs[coord_idx]
+                    if node_idx not in vertex_indices:
+                        vertex_indices[node_idx] = None
 
-    @classmethod
-    def create_face_nodes(cls,
-                          nodes_gdf: gpd.GeoDataFrame,
-                          faces_gdf: gpd.GeoDataFrame,
-                          facepoints_gdf: gpd.GeoDataFrame) -> np.ndarray:
-        # Populate face_nodes: map each face center to its surrounding vertices
-        # 1. Create mesh geometries from faces_gdf
-        mesh_cells = faces_gdf.polygonize()
-        spatial_index = mesh_cells.sindex
-        face_center_coords = nodes_gdf[['X', 'Y']].to_numpy()
+                        node_x[node_idx] = coords[0]
+                        node_y[node_idx] = coords[1]
+            face_nodes_list[face_center_idx] = list(vertex_indices.keys())
 
-        # 2. Get facepoints coordinates as numpy array for efficient nearest neighbor search
-        facepoints_coords = facepoints_gdf[['X', 'Y']].to_numpy()
-        
-        def find_nearest_facepoint(vx: float, vy: float, tolerance: float = 1e-6) -> int:
-            """Find the nearest facepoint index within tolerance."""
-            distances = np.sqrt((facepoints_coords[:, 0] - vx)**2 + (facepoints_coords[:, 1] - vy)**2)
-            min_dist_idx = np.argmin(distances)
-            min_dist = distances[min_dist_idx]
-
-            if min_dist > tolerance:
-                raise ValueError(f"Vertex ({vx}, {vy}) not found within tolerance {tolerance}. Nearest point is {min_dist} away.")
-
-            return min_dist_idx
-
-        # 3. For each face center, find its polygon and extract vertex indices
-        face_nodes_list = []
-        for x, y in face_center_coords:
-            center_point = Point((x, y))
-            # Get candidate polygons using spatial index
-            possible_matches_idx = list(spatial_index.intersection(center_point.bounds))
-            possible_matches = mesh_cells.iloc[possible_matches_idx]
-
-            # Find which polygon actually contains the point
-            match_found = False
-            for poly_geom in possible_matches.geometry:
-                if poly_geom.contains(center_point):
-                    # Extract vertices from polygon exterior (excluding last duplicate point)
-                    vertices = list(poly_geom.exterior.coords)[:-1]
-
-                    # Map vertices to facepoints indices using nearest neighbor search
-                    vertex_indices = []
-                    for vx, vy in vertices:
-                        idx = find_nearest_facepoint(vx, vy)
-                        vertex_indices.append(idx)
-
-                    face_nodes_list.append(vertex_indices)
-                    match_found = True
-                    break
-            assert match_found, f"No containing polygon found for node at ({x}, {y})"
+        assert all(len(face) > 0 for face in face_nodes_list), "Some faces have no associated nodes/vertices."
+        assert all(not np.isnan(x) for x in node_x), "Some node_x values are NaN as they have not been assigned."
+        assert all(not np.isnan(y) for y in node_y), "Some node_y values are NaN as they have not been assigned."
 
         # Convert to padded numpy array with NaN for different vertex counts
         max_vertices = max(len(face) for face in face_nodes_list)
         face_nodes = np.full((len(face_nodes_list), max_vertices), np.nan)
-        for i, vertex_indices in enumerate(face_nodes_list):
-            face_nodes[i, :len(vertex_indices)] = vertex_indices
+        for vertex_idx, vertex_indices in enumerate(face_nodes_list):
+            face_nodes[vertex_idx, :len(vertex_indices)] = vertex_indices
 
-        return face_nodes
+        return node_x, node_y, face_nodes
+
+    def _get_edge_attributes(self,
+                             faces_gdf: gpd.GeoDataFrame,
+                             inflow_bc_gdf: Optional[gpd.GeoDataFrame]) -> Tuple[np.ndarray, np.ndarray]:
+        '''Create mesh node/vertex attributes: edge_index, edge_type'''
+        edge_index = faces_gdf[['from', 'to']].to_numpy().T
+
+        merged_polygon = unary_union(faces_gdf.polygonize().to_list())
+        boundary_shape = merged_polygon.exterior
+        edge_type = np.ones(edge_index.shape[1], dtype=int) # Default = edge type 1
+        boundary_edge_idxs = faces_gdf.sindex.query(boundary_shape, predicate='intersects')
+        edge_type[boundary_edge_idxs] = 3  # Boundary edges = edge type 3
+        if inflow_bc_gdf is not None:
+            inflow_bc_edge_idxs = inflow_bc_gdf.sindex.query(boundary_shape, predicate='intersects')
+            edge_type[inflow_bc_edge_idxs] = 2  # Inflow BC edges = edge type 2
+
+        return edge_index, edge_type
 
     def to_nodes_gdf(self) -> gpd.GeoDataFrame:
         """
@@ -235,20 +207,6 @@ class HECRASMeshData:
         edges_gdf = gpd.GeoDataFrame(edges_list)
         return edges_gdf
 
-    def to_facepoints_gdf(self) -> gpd.GeoDataFrame:
-        """
-        Returns:
-            gpd.GeoDataFrame: GeoDataFrame with face point geometry and attributes
-                columns: 'X', 'Y', 'FP_index', 'geometry'
-        """
-        fp_geom = [Point(x, y) for x, y in zip(self.node_x, self.node_y)]
-        fp_gdf = gpd.GeoDataFrame({
-            'X': self.node_x,
-            'Y': self.node_y,
-            'FP_index': np.arange(len(self.node_x))
-        }, geometry=fp_geom)
-        return fp_gdf
-
     def to_faces_gdf(self) -> gpd.GeoDataFrame:
         """
         Returns:
@@ -272,4 +230,3 @@ class HECRASMeshData:
                 })
         faces_gdf = gpd.GeoDataFrame(faces_list)
         return faces_gdf
-

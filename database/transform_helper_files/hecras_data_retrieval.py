@@ -1,7 +1,7 @@
 import numpy as np
 
 from datetime import datetime
-from file_utils import read_hdf_file_as_numpy
+from .file_utils import read_hdf_file_as_numpy
 
 def get_event_timesteps(filepath: str) -> np.ndarray:
     property_path = 'Results.Unsteady.Output.Output Blocks.Base Output.Unsteady Time Series.Time Date Stamp'

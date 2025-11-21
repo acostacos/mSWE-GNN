@@ -1,6 +1,6 @@
 import numpy as np
 
-from file_utils import read_shp_file_as_numpy
+from .file_utils import read_shp_file_as_numpy
 
 def get_cell_position_x(filepath: str, dtype: np.dtype = np.float32) -> np.ndarray:
     columns = 'X'
