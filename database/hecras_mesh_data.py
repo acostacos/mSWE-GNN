@@ -50,13 +50,23 @@ class HECRASMeshData:
             ghost_nodes_gdf = nodes_gdf[ghost_nodes_mask]
             nodes_gdf = nodes_gdf[~ghost_nodes_mask]
 
-            ghost_edges_mask = (edges_gdf['from_node'].isin(ghost_nodes) | edges_gdf['to_node'].isin(ghost_nodes))
-            edges_gdf = edges_gdf[~ghost_edges_mask]
+            def flip_edge_direction(gdf, to_flip_mask):
+                gdf.loc[to_flip_mask, ['from_node', 'to_node']] = gdf.loc[to_flip_mask, ['to_node', 'from_node']].values
 
             if inflow_bc_nodes is not None:
                 assert inflow_bc_nodes in ghost_nodes, "Inflow boundary condition nodes must be a subset of ghost nodes."
 
                 inflow_bc_gdf = ghost_nodes_gdf[ghost_nodes_gdf['CC_index'].isin(inflow_bc_nodes)]
+
+                inflow_to_flip_mask = edges_gdf['to_node'].isin(inflow_bc_nodes)
+                flip_edge_direction(edges_gdf, inflow_to_flip_mask)
+                inflow_edges_mask = edges_gdf['from_node'].isin(inflow_bc_nodes)
+                edges_gdf.loc[inflow_edges_mask, 'from_node'] = -1
+
+            ghost_to_flip_mask = edges_gdf['from_node'].isin(ghost_nodes)
+            flip_edge_direction(edges_gdf, ghost_to_flip_mask)
+            ghost_edges_mask = edges_gdf['to_node'].isin(ghost_nodes)
+            edges_gdf.loc[ghost_edges_mask, 'to_node'] = -1
 
         face_x = nodes_gdf['X'].to_numpy()
         face_y = nodes_gdf['Y'].to_numpy()
@@ -213,7 +223,6 @@ class HECRASMeshData:
                 'link_index': i,
                 'from_node': from_node,
                 'to_node': to_node,
-                'edge_type': self.edge_type[i],
                 'geometry': edge_geom
             })
         edges_gdf = gpd.GeoDataFrame(edges_list)
@@ -238,6 +247,7 @@ class HECRASMeshData:
                     'face_index': i,
                     'from': from_idx,
                     'to': to_idx,
+                    'edge_type': self.edge_type[i],
                     'geometry': edge_geom
                 })
         faces_gdf = gpd.GeoDataFrame(faces_list)

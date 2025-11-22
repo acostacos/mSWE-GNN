@@ -12,11 +12,11 @@ from graph_creation import create_dataset_folders, save_database, create_hecras_
 from torch_geometric.data import Data
 from transform_helper_files.hecras_data_retrieval import get_water_level, get_velocity, get_face_flow, \
     get_cell_area, get_facepoint_coordinates, get_edge_direction_x, get_edge_direction_y, \
-    get_face_length, get_facecell_indexes, get_facepoint_indexes
+    get_face_length, get_facecell_indexes, get_facepoint_indexes, get_min_cell_elevation
 from transform_helper_files.shp_data_retrieval import get_cell_elevation, get_edge_index, get_cell_position
-from hecras_mesh_data import HECRASMeshData, extract_ghost_nodes
+from hecras_mesh_data import HECRASMeshData
 
-def get_info_from_config(config_file_path: str, root_dir: str, faces_shp_file: str, facepoints_shp_file) -> dict:
+def get_info_from_config(config_file_path: str, root_dir: str, faces_shp_file: str) -> dict:
     with open(config_file_path, 'r') as file:
         config = yaml.safe_load(file)
 
@@ -24,7 +24,6 @@ def get_info_from_config(config_file_path: str, root_dir: str, faces_shp_file: s
     nodes_shp_path = os.path.join(root_dir, 'raw', dataset_config['nodes_shp_file'])
     edges_shp_path = os.path.join(root_dir, 'raw', dataset_config['edges_shp_file'])
     faces_shp_path = os.path.join(root_dir, 'raw', faces_shp_file)
-    facepoints_shp_path = os.path.join(root_dir, 'raw', facepoints_shp_file)
     train_summary_path = os.path.join(root_dir, 'raw', dataset_config['training']['dataset_summary_file'])
     test_summary_path = os.path.join(root_dir, 'raw', dataset_config['testing']['dataset_summary_file'])
     inflow_boundary_nodes = dataset_config['inflow_boundary_nodes']
@@ -33,7 +32,6 @@ def get_info_from_config(config_file_path: str, root_dir: str, faces_shp_file: s
         'nodes_shp_path': nodes_shp_path,
         'edges_shp_path': edges_shp_path,
         'faces_shp_path': faces_shp_path,
-        'facepoints_shp_path': facepoints_shp_path,
         'train_summary_path': train_summary_path,
         'test_summary_path': test_summary_path,
         'inflow_boundary_nodes': inflow_boundary_nodes,
@@ -44,7 +42,6 @@ def get_dataset_info_from_summary(summary_path: str,
                                   nodes_shp_path: str,
                                   edges_shp_path: str,
                                   faces_shp_path: str,
-                                  facepoints_shp_path: str,
                                   inflow_boundary_nodes: list[int]) -> dict:
     summary_df = pd.read_csv(summary_path)
 
@@ -57,7 +54,6 @@ def get_dataset_info_from_summary(summary_path: str,
             'node_shp_path': nodes_shp_path,
             'edge_shp_path': edges_shp_path,
             'face_shp_path': faces_shp_path,
-            'facepoint_shp_path': facepoints_shp_path,
             'inflow_boundary_nodes': inflow_boundary_nodes,
         }
     return datasets
@@ -132,6 +128,7 @@ def get_inflow(hec_ras_path: str, edges_shp_path: str, inflow_boundary_nodes: li
 def get_hydraulic_features(hec_ras_file_path: str,
                            node_shp_path: str,
                            edges_shp_path: str,
+                           ghost_nodes: np.ndarray,
                            inflow_boundary_nodes: list[int],
                            spin_up_timesteps: int = None,
                            ts_from_peak_water_depth: int = None,
@@ -142,29 +139,32 @@ def get_hydraulic_features(hec_ras_file_path: str,
     water_depth = torch.clip(water_level - dem, min=0)
     inflow = get_inflow(hec_ras_file_path, edges_shp_path, inflow_boundary_nodes)
 
+    if ghost_nodes is not None and len(ghost_nodes) > 0:
+        ghost_node_mask = np.isin(np.arange(len(dem)), ghost_nodes)
+        dem = dem[~ghost_node_mask]
+        water_depth = water_depth[:, ~ghost_node_mask]
+        cell_velocity_x = cell_velocity_x[:, ~ghost_node_mask]
+        cell_velocity_y = cell_velocity_y[:, ~ghost_node_mask]
+
     # TODO: Implement spin-up, ts_from_peak_water_depth, downsample_interval
 
     return dem, water_depth, cell_velocity_x, cell_velocity_y, inflow
 
-def create_mesh_data_from_files(hec_ras_file_path: str,
-                                node_shp_path: str,
+def create_mesh_data_from_files(node_shp_path: str,
                                 edge_shp_path: str,
                                 face_shp_path: str,
-                                facepoint_shp_path: str,
+                                ghost_nodes: np.ndarray,
                                 inflow_boundary_nodes: list[int]):
     face_centers_gdf = gpd.read_file(node_shp_path)
     dual_edges_gdf = gpd.read_file(edge_shp_path)
     face_edges_gdf = gpd.read_file(face_shp_path)
-    face_vertices_gdf = gpd.read_file(facepoint_shp_path)
-    ghost_nodes = extract_ghost_nodes(hec_ras_file_path, face_centers_gdf)
 
     mesh_data = HECRASMeshData.from_gdfs(
-        face_centers_gdf,
-        dual_edges_gdf,
-        face_edges_gdf,
-        face_vertices_gdf,
-        ghost_nodes,
-        inflow_boundary_nodes,
+        nodes_gdf=face_centers_gdf,
+        edges_gdf=dual_edges_gdf,
+        faces_gdf=face_edges_gdf,
+        ghost_nodes=ghost_nodes,
+        inflow_bc_nodes=inflow_boundary_nodes,
     )
     return mesh_data
 
@@ -201,22 +201,25 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
                         ts_from_peak_water_depth: int = None,
                         downsample_interval: int = None,
                         number_of_multiscales: int = 4):
+    min_elevation = get_min_cell_elevation(hec_ras_file_path)
+    ghost_nodes = np.where(np.isnan(min_elevation))[0]
+
     DEM, WD, VX, VY, BC = get_hydraulic_features(hec_ras_file_path,
                                                  node_shp_path,
                                                  edge_shp_path,
+                                                 ghost_nodes,
                                                  inflow_boundary_nodes,
                                                  spin_up_timesteps,
                                                  ts_from_peak_water_depth,
                                                  downsample_interval)
     # BC[:,0] /= 60 # convert to minutes # TODO: See if you need this
 
-    data = Data()
-
     mesh_data = create_mesh_data_from_files(hec_ras_file_path,
                                             node_shp_path,
                                             edge_shp_path,
                                             face_shp_path,
                                             facepoint_shp_path,
+                                            ghost_nodes,
                                             inflow_boundary_nodes)
 
     # create multiscale meshes
@@ -239,6 +242,7 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     mesh = MultiscaleMesh()
     mesh.stack_meshes(meshes)
 
+    data = Data()
     data.node_ptr = torch.LongTensor(mesh.face_ptr)
     data.edge_ptr = torch.LongTensor(mesh.dual_edge_ptr)
     data.intra_edge_ptr = torch.LongTensor(mesh.intra_edge_ptr)
@@ -273,7 +277,7 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     data.area = torch.FloatTensor(mesh.face_area)
 
     data.mesh = mesh
-    
+
     data.node_BC = data.node_BC[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC only at the finest scale
     data.edge_BC_length = data.edge_BC_length[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC+edge only at the finest scale
     data.BC = torch.FloatTensor(BC).unsqueeze(0).repeat(len(data.node_BC), 1, 1) # This repeats the same BC
@@ -282,16 +286,15 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     return data
 
 def main():
-    root_dir = ""
-    config_file_path = ""
-    faces_shp_file = ""
-    facepoints_shp_file = ""
-    base_dataset_folder = ""
+    root_dir = "C:/Users/Carlo/Documents/School/Masters/NUS/Dissertation/flood_pi_gnn/data/datasets"
+    config_file_path = "C:/Users/Carlo/Documents/School/Masters/NUS/Dissertation/flood_pi_gnn/configs/config.yaml"
+    faces_shp_file = "New_Geometry/faces.shp"
+    base_dataset_folder = "hecras_datasets"
     spin_up_timesteps = 864
     ts_from_peak_water_depth = None # Set to None to disable
     downsample_interval = 3
 
-    info = get_info_from_config(config_file_path, root_dir, faces_shp_file, facepoints_shp_file)
+    info = get_info_from_config(config_file_path, root_dir, faces_shp_file)
     create_dataset_folders(dataset_folder=base_dataset_folder)
 
     # Training dataset creation
@@ -300,7 +303,6 @@ def main():
                                                    info['nodes_shp_path'],
                                                    info['edges_shp_path'],
                                                    info['faces_shp_path'],
-                                                   info['facepoints_shp_path'],
                                                    info['inflow_boundary_nodes'])
 
     train_pyg_dataset = create_mesh_dataset(train_datasets,
@@ -317,7 +319,6 @@ def main():
     #                                               info['nodes_shp_path'],
     #                                               info['edges_shp_path'],
     #                                               info['faces_shp_path'],
-    #                                               info['facepoints_shp_path'],
     #                                               info['inflow_boundary_nodes'])
 
     # for key, paths in test_datasets.items():
