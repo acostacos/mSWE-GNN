@@ -57,7 +57,6 @@ class HECRASMeshData:
                 assert inflow_bc_nodes in ghost_nodes, "Inflow boundary condition nodes must be a subset of ghost nodes."
 
                 inflow_bc_gdf = ghost_nodes_gdf[ghost_nodes_gdf['CC_index'].isin(inflow_bc_nodes)]
-                # inflow_bc_node_coords = inflow_nodes_gdf[['X', 'Y']].to_numpy()
 
         face_x = nodes_gdf['X'].to_numpy()
         face_y = nodes_gdf['Y'].to_numpy()
@@ -86,6 +85,36 @@ class HECRASMeshData:
     def _get_derived_attributes(self, faces_gdf: gpd.GeoDataFrame, inflow_bc_gdf: Optional[gpd.GeoDataFrame]):
         self.edge_index, self.edge_type = self._get_edge_attributes(faces_gdf, inflow_bc_gdf)
         self.node_x, self.node_y, self.face_nodes = self._get_node_attributes(faces_gdf, self.edge_index)
+
+    def _get_edge_attributes(self,
+                             faces_gdf: gpd.GeoDataFrame,
+                             inflow_bc_gdf: Optional[gpd.GeoDataFrame]) -> Tuple[np.ndarray, np.ndarray]:
+        '''Create mesh node/vertex attributes: edge_index, edge_type'''
+        edge_index = faces_gdf[['from', 'to']].to_numpy().T
+
+        merged_polygon = unary_union(faces_gdf.polygonize().to_list())
+        boundary_shape = merged_polygon.exterior
+        edge_type = np.ones(edge_index.shape[1], dtype=int) # Default = edge type 1
+
+        # Filter for edges closest to the boundary
+        boundary_edge_matches = faces_gdf.sindex.query(boundary_shape, predicate='intersects')
+
+        # Check which of these actually correspond to boundary edges
+        boundary_coords = list(merged_polygon.exterior.coords)
+        boundary_lines = [LineString([boundary_coords[i], boundary_coords[i+1]]) for i in range(len(boundary_coords)-1)]
+        for edge_idx in boundary_edge_matches:
+            edge_shape = faces_gdf.geometry.iloc[edge_idx]
+            for line in boundary_lines:
+                if edge_shape.equals(line):
+                    if inflow_bc_gdf is not None:
+                        edge_buffer = edge_shape.buffer(1e-6)  # Small buffer for point-line intersection
+                        inflow_bc_edge_idxs = inflow_bc_gdf.sindex.query(edge_buffer, predicate='intersects')
+                        if len(inflow_bc_edge_idxs) > 0:
+                            edge_type[edge_idx] = 2  # Inflow BC edges = edge type 2
+                            continue
+                    edge_type[edge_idx] = 3  # Boundary edges = edge type 3
+
+        return edge_index, edge_type
  
     def _get_node_attributes(self, faces_gdf: gpd.GeoDataFrame, edge_index: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         '''Create mesh node/vertex attributes: node_x, node_y, face_nodes'''
@@ -151,23 +180,6 @@ class HECRASMeshData:
             face_nodes[vertex_idx, :len(vertex_indices)] = vertex_indices
 
         return node_x, node_y, face_nodes
-
-    def _get_edge_attributes(self,
-                             faces_gdf: gpd.GeoDataFrame,
-                             inflow_bc_gdf: Optional[gpd.GeoDataFrame]) -> Tuple[np.ndarray, np.ndarray]:
-        '''Create mesh node/vertex attributes: edge_index, edge_type'''
-        edge_index = faces_gdf[['from', 'to']].to_numpy().T
-
-        merged_polygon = unary_union(faces_gdf.polygonize().to_list())
-        boundary_shape = merged_polygon.exterior
-        edge_type = np.ones(edge_index.shape[1], dtype=int) # Default = edge type 1
-        boundary_edge_idxs = faces_gdf.sindex.query(boundary_shape, predicate='intersects')
-        edge_type[boundary_edge_idxs] = 3  # Boundary edges = edge type 3
-        if inflow_bc_gdf is not None:
-            inflow_bc_edge_idxs = inflow_bc_gdf.sindex.query(boundary_shape, predicate='intersects')
-            edge_type[inflow_bc_edge_idxs] = 2  # Inflow BC edges = edge type 2
-
-        return edge_index, edge_type
 
     def to_nodes_gdf(self) -> gpd.GeoDataFrame:
         """
