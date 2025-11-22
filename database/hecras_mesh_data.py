@@ -100,7 +100,7 @@ class HECRASMeshData:
                              faces_gdf: gpd.GeoDataFrame,
                              inflow_bc_gdf: Optional[gpd.GeoDataFrame]) -> Tuple[np.ndarray, np.ndarray]:
         '''Create mesh node/vertex attributes: edge_index, edge_type'''
-        edge_index = faces_gdf[['from', 'to']].to_numpy().T
+        edge_index = faces_gdf[['from', 'to']].to_numpy(dtype=np.int64).T
 
         merged_polygon = unary_union(faces_gdf.polygonize().to_list())
         boundary_shape = merged_polygon.exterior

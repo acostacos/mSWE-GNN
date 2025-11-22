@@ -1395,9 +1395,14 @@ def interpolate_BC_location_multiscale(meshes, edge_BC_mid):
         while not is_there_edge_BC:
             possible_edges = np.array([find_closest_nodes(mesh.node_xy, edge, top_n=top_n) for edge in edge_BC_mid])
             mesh.edge_index_BC = np.array([[node for node in edge if (mesh.node_xy[node] == mesh.boundary_nodes).sum() == 2] for edge in possible_edges])
-            mesh.edge_BC = np.array([np.where(((edge == mesh.edge_index.T).sum(1) == 2) | 
-                                            ((edge[::-1] == mesh.edge_index.T).sum(1) == 2))[0] 
-                                            for edge in mesh.edge_index_BC]).reshape(-1)
+
+            if mesh.edge_index_BC.size == 0:
+                mesh.edge_BC = np.array([])
+            else:
+                mesh.edge_BC = np.array([np.where(((edge == mesh.edge_index.T).sum(1) == 2) | 
+                                                ((edge[::-1] == mesh.edge_index.T).sum(1) == 2))[0] 
+                                                for edge in mesh.edge_index_BC]).reshape(-1)
+
             if mesh.edge_BC.shape[0] == 1:
                 is_there_edge_BC = True
             elif top_n > 10:
@@ -1447,7 +1452,8 @@ def get_ghost_nodes(mesh):
     ghost_edge_index = []
     ghost_face_nodes = []
 
-    ghost_nodes = mesh.nodes_per_face[mesh.face_BC]-2
+    # Limit to max 2 ghost nodes per BC face. Polygons with more than 4 nodes are approximated as quadrilaterals.
+    ghost_nodes = np.clip(mesh.nodes_per_face[mesh.face_BC]-2, a_min=None, a_max=2)
     mesh.ghost_node_ids = [mesh.node_x.shape[0]-j-1 for j in range(ghost_nodes.sum())][::-1]
 
     for i in range(num_BC_faces):
@@ -1496,6 +1502,19 @@ def find_BC_other_nodes(mesh):
 
     return np.concatenate(the_other_node)
 
+def approximate_polygon_as_quad(other_nodes_xy, edge_nodes_xy):
+    """
+    Approximate a polygon with n nodes as a quadrilateral for ghost cell mirroring.
+    Only consider the two nodes that are furthest from the edge center.
+    """
+    num_other_nodes = other_nodes_xy.shape[0]
+    if num_other_nodes <= 2: # For triangles or quadrilaterals, no approximation needed
+        return other_nodes_xy
+    edge_center = edge_nodes_xy.mean(axis=0, keepdims=True).repeat(num_other_nodes, axis=0)
+    distances = np.linalg.norm(other_nodes_xy - edge_center, axis=1)
+    furthest_indices = np.argsort(distances)[-2:]
+    return other_nodes_xy[furthest_indices]
+
 def find_face_BC(mesh):
     """Find the faces that have boundary conditions (face_BC), knowing the edges with boundary conditions (edge_index_BC)"""
     face_BC = []
@@ -1531,18 +1550,34 @@ def add_ghost_cells_mesh(mesh):
         the_other_node = find_BC_other_nodes(mesh)
 
         face_BC_xy = mesh.face_xy[mesh.face_BC]
-        node_BC_xy = mesh.node_xy[the_other_node]
+
+        is_triangle_or_quad = np.all(np.isin(mesh.nodes_per_face[mesh.face_BC], [3,4])) # Previous implementation
+        if is_triangle_or_quad:
+            node_BC_xy = mesh.node_xy[the_other_node]
+        else:
+            approximated_other_nodes = []
+            offset = 0
+            for i, face in enumerate(mesh.face_BC):
+                edge_nodes_xy = mesh.node_xy[mesh.edge_index_BC[i]]
+                num_other_nodes = mesh.nodes_per_face[face] - 2
+                other_nodes_xy = mesh.node_xy[the_other_node[offset:offset+num_other_nodes]]
+                approx_nodes = approximate_polygon_as_quad(other_nodes_xy, edge_nodes_xy)
+                approximated_other_nodes.append(approx_nodes)
+                offset += num_other_nodes
+            node_BC_xy = np.concatenate(approximated_other_nodes)
 
         # faces are mirrored w.r.t. edge center
         face_symmetry_point = mesh.node_xy[mesh.edge_index_BC].mean(1)
 
         edge_outward_normal_faces = mesh.edge_outward_normal[mesh.edge_BC]
 
+        # Limit to max 4, since higher degree polygons are approximated as quadrilaterals
+        nodes_per_face_BC = np.clip(mesh.nodes_per_face[mesh.face_BC], a_min=None, a_max=4)
         # nodes are mirrored w.r.t. edge center (triangles) or edge nodes (quatrilaterals)
-        node_symmetry_point = np.concatenate([item.mean(0) if mesh.nodes_per_face[mesh.face_BC][i] == 3
+        node_symmetry_point = np.concatenate([item.mean(0) if nodes_per_face_BC[i] == 3
                                         else item for i, item in enumerate(mesh.node_xy[mesh.edge_index_BC])]).reshape(-1,2)
 
-        edge_outward_normal_nodes = np.concatenate([np.repeat(item.reshape(1,-1), 2, axis=0) if mesh.nodes_per_face[mesh.face_BC][i] == 4
+        edge_outward_normal_nodes = np.concatenate([np.repeat(item.reshape(1,-1), 2, axis=0) if nodes_per_face_BC[i] == 4
                                         else item for i, item in enumerate(mesh.edge_outward_normal[mesh.edge_BC])]).reshape(-1,2)
 
         distance_face_edge_BC = np.linalg.norm((face_BC_xy - face_symmetry_point), axis=1).reshape(-1,1)
@@ -1568,7 +1603,7 @@ def add_ghost_cells_mesh(mesh):
         mesh.face_x = np.concatenate((mesh.face_x, ghost_face_BC_xy[:,0]))
         mesh.face_y = np.concatenate((mesh.face_y, ghost_face_BC_xy[:,1]))
 
-        mesh.nodes_per_face = np.concatenate((mesh.nodes_per_face, mesh.nodes_per_face[mesh.face_BC]))
+        mesh.nodes_per_face = np.concatenate((mesh.nodes_per_face, nodes_per_face_BC))
         
         # update edge_index and dual_edge_index after adding ghost cells
         # dual_edge_index is converted to undirected
