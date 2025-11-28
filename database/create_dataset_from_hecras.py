@@ -172,6 +172,7 @@ def create_mesh_dataset(dataset_info: dict,
                         spin_up_timesteps: int = None,
                         ts_from_peak_water_depth: int = None,
                         downsample_interval: int = None,
+                        type_bc: int = 2,
                         number_of_multiscales=4):
     mesh_dataset = []
 
@@ -185,7 +186,7 @@ def create_mesh_dataset(dataset_info: dict,
 
         data = convert_mesh_to_pyg(hec_ras_file_path, node_shp_path, edge_shp_path, face_shp_path,
                                    inflow_boundary_nodes, spin_up_timesteps, ts_from_peak_water_depth,
-                                   downsample_interval, number_of_multiscales)
+                                   downsample_interval, type_bc, number_of_multiscales)
         mesh_dataset.append(data)
     
     return mesh_dataset
@@ -198,6 +199,7 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
                         spin_up_timesteps: int = None,
                         ts_from_peak_water_depth: int = None,
                         downsample_interval: int = None,
+                        type_bc: int = 2,
                         number_of_multiscales: int = 4):
     min_elevation = get_min_cell_elevation(hec_ras_file_path)
     ghost_nodes = np.where(np.isnan(min_elevation))[0]
@@ -222,11 +224,9 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     meshes = create_hecras_multiscale_mesh(mesh_data=mesh_data,
                                            coarsening_factor=0.5,
                                            number_of_multiscales=number_of_multiscales-1)
-    meshes.append(copy(meshes[0]))
-    meshes[-1]._import_from_hecras_data(mesh_data)
-    # TODO: See if you need to reverse normals
-    # meshes[-1].edge_outward_normal[meshes[-1].edge_BC] *= -1  # reverse the normal of the boundary edges
-    meshes = meshes[::-1]
+    meshes = [copy(meshes[0])] + meshes[:]
+    meshes[0]._import_from_hecras_data(mesh_data)
+    meshes[0].edge_outward_normal[meshes[0].edge_BC] *= -1  # reverse the normal of the boundary edges
 
     # Add boundary conditions to multiscale meshes
     edge_BC_mid = meshes[0].node_xy[meshes[0].edge_index_BC].mean(1)
@@ -245,11 +245,11 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     data.intra_mesh_edge_index = torch.LongTensor(mesh.intra_mesh_dual_edge_index)
 
     # get multiscale attributes
-    DEM, WD, VX, VY = pool_multiscale_attributes(mesh, DEM, WD, VX, VY, reduce='mean')
-    DEM = update_ghost_cells_attributes(mesh, DEM)[0] #correct ghost cells values after pooling
+    mesh.DEM, WD, VX, VY = pool_multiscale_attributes(mesh, DEM, WD, VX, VY, reduce='mean')
+    mesh.DEM = update_ghost_cells_attributes(mesh, mesh.DEM)[0] #correct ghost cells values after pooling
 
     # Assign data features
-    data.DEM = torch.FloatTensor(DEM)
+    data.DEM = torch.FloatTensor(mesh.DEM)
     data.WD = torch.FloatTensor(WD)
     data.VX = torch.FloatTensor(VX)
     data.VY = torch.FloatTensor(VY)
@@ -266,11 +266,11 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     data.mesh = mesh
 
     data.node_BC = torch.IntTensor(mesh.ghost_cells_ids)
-    data.node_BC = data.node_BC[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC only at the finest scale
     data.edge_BC_length = torch.FloatTensor(mesh.edge_length[mesh.edge_BC])
+    data.node_BC = data.node_BC[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC only at the finest scale
     data.edge_BC_length = data.edge_BC_length[:len(mesh.ghost_cells_ids)//number_of_multiscales] # select BC+edge only at the finest scale
     data.BC = torch.FloatTensor(BC).unsqueeze(0).repeat(len(data.node_BC), 1, 1) # This repeats the same BC
-    data.type_BC = torch.tensor(2, dtype=torch.int) # 2 = inflow / discharge BC type
+    data.type_BC = torch.tensor(type_bc, dtype=torch.int) # 2 = inflow / discharge BC type
 
     return data
 

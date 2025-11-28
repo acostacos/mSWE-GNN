@@ -792,7 +792,8 @@ class Mesh(object):
 
         self.edge_index_BC = self.edge_index[:,self.edge_type == 2].T
         self.boundary_edges = self.edge_index[:,self.edge_type > 1].T
-        self.edge_BC = np.stack([np.where((edge==self.edge_index.T).sum(1) == 2) for edge in self.edge_index_BC]).reshape(-1)
+        edge_BC_idxs = [np.where((edge==self.edge_index.T).sum(1) == 2) for edge in self.edge_index_BC]
+        self.edge_BC = np.stack(edge_BC_idxs).reshape(-1) if len(edge_BC_idxs) > 0 else np.array([])
 
         face_bnd_mask = self.dual_edge_index[0,:] == -1
         self.face_BC = self.dual_edge_index[1,face_bnd_mask]
@@ -1149,7 +1150,7 @@ def create_coarse_mesh_cluster(mesh_data: HECRASMeshData,
         face_y=coarse_face_y,
         dual_edge_index=coarse_dual_edge_index,
         faces_gdf=coarse_faces_gdf,
-        inflow_bc_gdf=mesh_data.inflow_bc_gdf,
+        inflow_bc_gdf=None, # BCs will be added through interpolate_BC_location_multiscale
     )
 
     if not silent:
