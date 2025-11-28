@@ -275,9 +275,9 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     return data
 
 def main():
-    root_dir = "C:/Users/Carlo/Documents/School/Masters/NUS/Dissertation/flood_pi_gnn/data/datasets"
-    config_file_path = "C:/Users/Carlo/Documents/School/Masters/NUS/Dissertation/flood_pi_gnn/configs/config.yaml"
-    faces_shp_file = "New_Geometry/faces.shp"
+    root_dir = ""
+    config_file_path = ""
+    faces_shp_file = ""
     base_dataset_folder = "hecras_datasets"
     spin_up_timesteps = 864
     ts_from_peak_water_depth = None # Set to None to disable
