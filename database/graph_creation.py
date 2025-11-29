@@ -25,6 +25,8 @@ from shapely.ops import unary_union
 import xarray as xr
 from meshkernel import MeshKernel, Mesh2d, GeometryList, OrthogonalizationParameters, ProjectToLandBoundaryOption, MeshRefinementParameters
 from meshkernel import py_structures, DeleteMeshOption
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__))) # For handling running within package and outside of it
 from hecras_mesh_data import HECRASMeshData
 
 def center_grid_graph(dim1, dim2, grid_size=1):

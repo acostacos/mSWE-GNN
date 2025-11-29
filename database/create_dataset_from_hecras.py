@@ -123,9 +123,37 @@ def get_inflow(hec_ras_path: str, edges_shp_path: str, inflow_boundary_nodes: li
     inflow_edges_mask = np.any(np.isin(edge_index, inflow_boundary_nodes), axis=0)
     inflow = face_flow[:, inflow_edges_mask].sum(axis=1)
 
+    dim_padding = np.zeros((inflow.shape[0], 1))
+    inflow = np.concatenate([dim_padding, inflow[:, None]], axis=1)
+
     return inflow
 
-def get_hydraulic_features(hec_ras_file_path: str,
+def downsample_dynamic_data(dynamic_data: torch.Tensor, step: int, aggr: str = 'first') -> torch.Tensor:
+    if step == 1:
+        return dynamic_data
+
+    # Trim array to be divisible by step
+    trimmed_length = (dynamic_data.shape[0] // step) * step
+    trimmed_array = dynamic_data[:trimmed_length]
+
+    if aggr == 'first':
+        return trimmed_array[::step]
+
+    elif aggr in ['mean', 'sum']:
+        # Reshape to group consecutive elements
+        if dynamic_data.ndim == 1:
+            reshaped = trimmed_array.reshape(-1, step) # (timesteps, step)
+        else:
+            reshaped = trimmed_array.reshape(-1, step, dynamic_data.shape[1]) # (timesteps, step, feature)
+
+        if aggr == 'mean':
+            return torch.mean(reshaped, axis=1)
+        elif aggr == 'sum':
+            return torch.sum(reshaped, axis=1)
+
+    raise ValueError(f"Aggregation method '{aggr}' is not supported")
+
+def get_hecras_features(hec_ras_file_path: str,
                            node_shp_path: str,
                            edges_shp_path: str,
                            ghost_nodes: np.ndarray,
@@ -133,22 +161,44 @@ def get_hydraulic_features(hec_ras_file_path: str,
                            spin_up_timesteps: int = None,
                            ts_from_peak_water_depth: int = None,
                            downsample_interval: int = None):
-    cell_velocity_x, cell_velocity_y = get_cell_velocity(hec_ras_file_path, node_shp_path)
     dem = torch.FloatTensor(get_cell_elevation(node_shp_path))
+    area = get_cell_area(hec_ras_file_path) # Returned as numpy array
     water_level = torch.FloatTensor(get_water_level(hec_ras_file_path))
     water_depth = torch.clip(water_level - dem, min=0)
-    inflow = get_inflow(hec_ras_file_path, edges_shp_path, inflow_boundary_nodes)
+    cell_velocity_x, cell_velocity_y = get_cell_velocity(hec_ras_file_path, node_shp_path)
+    inflow = torch.FloatTensor(get_inflow(hec_ras_file_path, edges_shp_path, inflow_boundary_nodes))
 
     if ghost_nodes is not None and len(ghost_nodes) > 0:
         ghost_node_mask = np.isin(np.arange(len(dem)), ghost_nodes)
         dem = dem[~ghost_node_mask]
+        area = area[~ghost_node_mask]
         water_depth = water_depth[:, ~ghost_node_mask]
         cell_velocity_x = cell_velocity_x[:, ~ghost_node_mask]
         cell_velocity_y = cell_velocity_y[:, ~ghost_node_mask]
 
-    # TODO: Implement spin-up, ts_from_peak_water_depth, downsample_interval
+    start = spin_up_timesteps if spin_up_timesteps is not None else 0
+    end = None
+    if ts_from_peak_water_depth is not None:
+        peak_water_depth_ts = water_depth.sum(axis=1).argmax().item()
+        end = peak_water_depth_ts + ts_from_peak_water_depth
 
-    return dem, water_depth, cell_velocity_x, cell_velocity_y, inflow
+    water_depth = water_depth[start:end]
+    cell_velocity_x = cell_velocity_x[start:end]
+    cell_velocity_y = cell_velocity_y[start:end]
+    inflow = inflow[start:end]
+
+    if downsample_interval is not None:
+        water_depth = downsample_dynamic_data(water_depth, downsample_interval, aggr='mean')
+        cell_velocity_x = downsample_dynamic_data(cell_velocity_x, downsample_interval, aggr='mean')
+        cell_velocity_y = downsample_dynamic_data(cell_velocity_y, downsample_interval, aggr='mean')
+        inflow = downsample_dynamic_data(inflow, downsample_interval, aggr='mean')
+    
+    # Flip dimensions to have shape (num_nodes, num_ts)
+    water_depth = water_depth.transpose(1, 0)
+    cell_velocity_x = cell_velocity_x.transpose(1, 0)
+    cell_velocity_y = cell_velocity_y.transpose(1, 0)
+
+    return dem, area, water_depth, cell_velocity_x, cell_velocity_y, inflow
 
 def create_mesh_data_from_files(node_shp_path: str,
                                 edge_shp_path: str,
@@ -204,15 +254,14 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     min_elevation = get_min_cell_elevation(hec_ras_file_path)
     ghost_nodes = np.where(np.isnan(min_elevation))[0]
 
-    DEM, WD, VX, VY, BC = get_hydraulic_features(hec_ras_file_path,
-                                                 node_shp_path,
-                                                 edge_shp_path,
-                                                 ghost_nodes,
-                                                 inflow_boundary_nodes,
-                                                 spin_up_timesteps,
-                                                 ts_from_peak_water_depth,
-                                                 downsample_interval)
-    # BC[:,0] /= 60 # convert to minutes # TODO: See if you need this
+    DEM, AREA, WD, VX, VY, BC = get_hecras_features(hec_ras_file_path,
+                                                    node_shp_path,
+                                                    edge_shp_path,
+                                                    ghost_nodes,
+                                                    inflow_boundary_nodes,
+                                                    spin_up_timesteps,
+                                                    ts_from_peak_water_depth,
+                                                    downsample_interval)
 
     mesh_data = create_mesh_data_from_files(node_shp_path,
                                             edge_shp_path,
@@ -237,6 +286,10 @@ def convert_mesh_to_pyg(hec_ras_file_path: str,
     # create multiscale mesh
     mesh = MultiscaleMesh()
     mesh.stack_meshes(meshes)
+
+    # Update fine scale face area to be the area from HEC-RAS
+    num_ghost_cells = len(mesh.ghost_cells_ids) // number_of_multiscales
+    mesh.face_area[mesh.face_ptr[0]:mesh.face_ptr[1] - num_ghost_cells] = AREA
 
     data = Data()
     data.node_ptr = torch.LongTensor(mesh.face_ptr)
@@ -309,15 +362,12 @@ def main():
                                                   info['edges_shp_path'],
                                                   info['faces_shp_path'],
                                                   info['inflow_boundary_nodes'])
-
-    for key, paths in test_datasets.items():
-        test_pyg_dataset = create_mesh_dataset({key: paths},
-                                            spin_up_timesteps,
-                                            ts_from_peak_water_depth,
-                                            downsample_interval)
-        test_folder = f"{base_dataset_folder}/test"
-        save_database(test_pyg_dataset, name=key, out_path=test_folder)
-        print(f"Testing dataset for Event {key} created and saved in folder {test_folder}.")
-
+    test_pyg_dataset = create_mesh_dataset(test_datasets,
+                                           spin_up_timesteps,
+                                           ts_from_peak_water_depth,
+                                           downsample_interval)
+    test_folder = f"{base_dataset_folder}/test"
+    save_database(test_pyg_dataset, name='hecras', out_path=test_folder)
+    print(f"Testing dataset created and saved in folder {test_folder}.")
 if __name__ == "__main__":
     main()

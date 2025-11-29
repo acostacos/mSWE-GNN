@@ -1,4 +1,5 @@
 # Libraries
+import os
 import torch
 import wandb
 import time
@@ -8,12 +9,15 @@ from torch_geometric.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
+from argparse import ArgumentParser
 from utils.dataset import create_model_dataset, to_temporal_dataset
 from utils.dataset import get_temporal_test_dataset_parameters
 from utils.load import read_config
 from utils.visualization import PlotRollout
 from utils.miscellaneous import get_numerical_times, get_speed_up, get_model, SpatialAnalysis, fix_dict_in_config
+from utils.logging_utils import Logger
 from training.train import LightningTrainer, DataModule, CurriculumLearning
+from validation.validation_stats import ValidationStats
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
@@ -125,12 +129,12 @@ def main(config):
     # validate with trained model
     trainer.validate(plmodule, pldatamodule)
 
-    # Numerical simulation times
-    maximum_time = test_dataset[0].WD.shape[1]
-    numerical_times = get_numerical_times(test_dataset_name+'_test', 
-                    test_size, temporal_res, maximum_time, 
-                    **temporal_test_dataset_parameters,
-                    overview_file='database/overview.csv')
+    # # Numerical simulation times
+    # maximum_time = test_dataset[0].WD.shape[1]
+    # numerical_times = get_numerical_times(test_dataset_name+'_test', 
+    #                 test_size, temporal_res, maximum_time, 
+    #                 **temporal_test_dataset_parameters,
+    #                 overview_file='database/overview.csv')
 
     # Rollout error and time
     temporal_test_dataset = to_temporal_dataset(test_dataset, rollout_steps=-1, **temporal_test_dataset_parameters)
@@ -146,6 +150,67 @@ def main(config):
     spatial_analyser = SpatialAnalysis(predicted_rollout, prediction_times, 
                                    test_dataset, **temporal_test_dataset_parameters)
     
+    # ===================== Validation statistics ====================
+    WATER_DEPTH_IDX = 0
+    CLIP_NEGATIVE_WATER_DEPTH = True
+    REMOVE_GHOST_NODES = True
+    START_GHOST_NODE_IDX = 1126 # for HEC-RAS dataset
+    NUM_TS_GT_PAD = 1 # Num timesteps of ground truth to be added at start; Used to balance rollout length with other compared models
+    CSI_THRESHOLD = 0.05
+
+    output_paths = config.get('output_paths', None)
+    if output_paths is not None:
+        assert len(output_paths) == len(test_dataset), "Length of output_paths must match test dataset length"
+
+        # Prediction metrics
+        logger = Logger()
+        num_datasets = len(spatial_analyser.predicted_rollout)
+        for dataset_idx in range(num_datasets):
+            validation_stats = ValidationStats(logger=logger)
+            pred_rollout = spatial_analyser.predicted_rollout[dataset_idx][:, WATER_DEPTH_IDX, :]
+            real_rollout = spatial_analyser.real_rollout[dataset_idx][:, WATER_DEPTH_IDX, :]
+
+            if NUM_TS_GT_PAD is not None:
+                assert NUM_TS_GT_PAD < previous_t, "NUM_TS_GT_PAD must be less than previous_t"
+
+                gt_pad = test_dataset[dataset_idx].WD[:real_rollout.shape[0], previous_t-NUM_TS_GT_PAD:previous_t]
+
+                pred_rollout = torch.cat([gt_pad, pred_rollout], dim=-1)
+                real_rollout = torch.cat([gt_pad, real_rollout], dim=-1)
+            
+            if REMOVE_GHOST_NODES:
+                pred_rollout = pred_rollout[:START_GHOST_NODE_IDX, :]
+                real_rollout = real_rollout[:START_GHOST_NODE_IDX, :]
+
+            for i in range(pred_rollout.shape[-1]):
+                water_depth_pred = pred_rollout[:, i].unsqueeze(-1)
+                water_depth_target = real_rollout[:, i].unsqueeze(-1)
+
+                if CLIP_NEGATIVE_WATER_DEPTH:
+                    # Clip negative values for water depth
+                    water_depth_pred = torch.clip(water_depth_pred, min=0)
+                    water_depth_target = torch.clip(water_depth_target, min=0)
+
+                validation_stats.update_stats_for_timestep(water_depth_pred.cpu(),
+                                                           water_depth_target.cpu(),
+                                                           water_threshold=CSI_THRESHOLD)
+
+            validation_stats.print_stats_summary()
+
+            save_path = output_paths[dataset_idx]
+            if not os.path.exists(os.path.dirname(save_path)):
+                os.makedirs(os.path.dirname(save_path))
+            validation_stats.save_stats(save_path)
+            print('================================')
+
+    # Prediction time
+    print(f'Average inference time per dataset: {prediction_times:4f} seconds', flush=True)
+
+    n_timesteps = spatial_analyser.predicted_rollout[0].shape[2]
+    inference_pred_time = prediction_times / n_timesteps
+    print(f'Inference time for one timestep: {inference_pred_time:4f} seconds', flush=True)
+    # ===================================================================
+    
     rollout_loss = spatial_analyser._get_rollout_loss(type_loss=type_loss)
     model_times = spatial_analyser.prediction_times
                                         
@@ -153,38 +218,44 @@ def main(config):
     print('test roll loss V:',rollout_loss.mean(0)[1:].mean().item())
 
     # Speed up
-    avg_speedup, std_speedup = get_speed_up(numerical_times, model_times)
+    # avg_speedup, std_speedup = get_speed_up(numerical_times, model_times)
 
     print(f'test CSI_005: {spatial_analyser._get_CSI(water_threshold=0.05).nanmean().item()}')
     print(f'test CSI_03: {spatial_analyser._get_CSI(water_threshold=0.3).nanmean().item()}')
 
-    wandb.log({"speed-up": avg_speedup,
+    wandb.log({
+                # "speed-up": avg_speedup,
                "test roll loss WD":rollout_loss.mean(0)[0].item(),
                "test roll loss V":rollout_loss.mean(0)[1:].mean().item(),
                "test CSI_005": spatial_analyser._get_CSI(water_threshold=0.05).nanmean().item(),
                 "test CSI_03": spatial_analyser._get_CSI(water_threshold=0.3).nanmean().item()
                 })
 
-    fig, _ = spatial_analyser.plot_CSI_rollouts(water_thresholds=[0.05, 0.3])
-    plt.savefig("results/CSI.png")
+    # fig, _ = spatial_analyser.plot_CSI_rollouts(water_thresholds=[0.05, 0.3])
+    # plt.savefig("results/CSI.png")
 
-    best_id = rollout_loss.mean(1).argmin().item()
-    worst_id = rollout_loss.mean(1).argmax().item()
+    # best_id = rollout_loss.mean(1).argmin().item()
+    # worst_id = rollout_loss.mean(1).argmax().item()
     
-    for id_dataset, name in zip([best_id, worst_id],['best', 'worst']):
-        rollout_plotter = PlotRollout(model.to(device), test_dataset[id_dataset].to(device), scalers=scalers, 
-            type_loss=type_loss, **temporal_test_dataset_parameters)
-        if model_type == 'MSGNN':
-            fig = rollout_plotter.explore_rollout(scale=0)
-        else:
-            fig = rollout_plotter.explore_rollout()
-        plt.savefig(f"results/simulation_{name}.png")
+    # for id_dataset, name in zip([best_id, worst_id],['best', 'worst']):
+    #     rollout_plotter = PlotRollout(model.to(device), test_dataset[id_dataset].to(device), scalers=scalers, 
+    #         type_loss=type_loss, **temporal_test_dataset_parameters)
+    #     if model_type == 'MSGNN':
+    #         fig = rollout_plotter.explore_rollout(scale=0)
+    #     else:
+    #         fig = rollout_plotter.explore_rollout()
+    #     plt.savefig(f"results/simulation_{name}.png")
     
     print('Training and testing finished!')
 
 if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument('--config', type=str, default='config.yaml', help='Path to the configuration file.')
+    args = parser.parse_args()
+
     # Read configuration file with parameters
-    cfg = read_config('config.yaml')
+    print('Reading config file:', args.config)
+    cfg = read_config(args.config)
 
     wandb.init(
         config=cfg,

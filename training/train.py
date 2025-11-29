@@ -123,7 +123,7 @@ class LightningTrainer(L.LightningModule):
         self.curriculum_epoch = trainer_options['curriculum_epoch']
         
     def training_step(self, batch):
-        self.log("rollout_steps", torch.tensor(self.rollout_steps, dtype=torch.float32), on_step=False, on_epoch=True)
+        self.log("rollout_steps", torch.tensor(self.rollout_steps, dtype=torch.float32), on_step=False, on_epoch=True, batch_size=self.batch_size)
         temp = adapt_batch_training(batch)
         roll_loss = []
 
@@ -141,8 +141,12 @@ class LightningTrainer(L.LightningModule):
             roll_loss.append(loss)
 
         loss = torch.stack(roll_loss).mean()
-        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         return loss
+
+    def on_train_epoch_end(self):
+        avg_loss = self.trainer.callback_metrics.get("train_loss")
+        self.print(f"Epoch {self.current_epoch} - Train Loss: {avg_loss:.4f}", flush=True)
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), 
@@ -175,9 +179,13 @@ class LightningTrainer(L.LightningModule):
         CSI_005 = get_CSI(predicted_rollout, real_rollout, water_threshold=0.05).nanmean()
         CSI_03 = get_CSI(predicted_rollout, real_rollout, water_threshold=0.3).nanmean()
         
-        self.log("val_loss", val_loss, prog_bar=True)
-        self.log("val_CSI_005", CSI_005, prog_bar=True)
-        self.log("val_CSI_03", CSI_03, prog_bar=False)
+        self.log("val_loss", val_loss, prog_bar=True, batch_size=self.batch_size)
+        self.log("val_CSI_005", CSI_005, prog_bar=True, batch_size=self.batch_size)
+        self.log("val_CSI_03", CSI_03, prog_bar=False, batch_size=self.batch_size)
+
+    def on_validation_epoch_end(self):
+        avg_loss = self.trainer.callback_metrics.get("val_loss")
+        self.print(f"Epoch {self.current_epoch} - Avg Val Loss: {avg_loss:.4f}", flush=True)
 
     def predict_step(self, batch, batch_idx):     
         predicted_rollout = rollout_test(self.model, batch)

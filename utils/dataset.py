@@ -407,7 +407,7 @@ def get_temporal_samples_size(maximum_time, time_start=0, time_stop=-1, rollout_
 
     return temporal_sample_size
 
-def to_temporal(data, previous_t=2, time_start=0, time_stop=-1, rollout_steps=1):
+def to_temporal(data, previous_t=2, time_start=0, time_stop=-1, rollout_steps=1, with_dry_bed=True):
     '''Converts Data object with temporal signal on graph into multiple graphs
     
     previous_t: int (default=2)
@@ -423,12 +423,21 @@ def to_temporal(data, previous_t=2, time_start=0, time_stop=-1, rollout_steps=1)
     temporal_data = []
     device = data.x.device
     maximum_time = data.WD.shape[1]
+    if not with_dry_bed:
+        time_stop = time_stop % maximum_time - time_start + 1 - previous_t
+
     temporal_samples_size = get_temporal_samples_size(maximum_time, time_start, time_stop, rollout_steps)
     rollout_steps = (rollout_steps%(time_stop%maximum_time-time_start+1)) if rollout_steps < 0 else rollout_steps
 
-    WD = add_dry_bed_condition(data.WD, previous_t)
-    BC = torch.cat((add_dry_bed_condition(data.BC, previous_t), data.BC[:,-1:]), 1) # Also add the last BC because of mass conservation
-    V = add_dry_bed_condition(data.V, previous_t)
+    if not with_dry_bed:
+        WD = data.WD
+        BC = torch.cat((data.BC, data.BC[:,-1:]), 1) # Also add the last BC because of mass conservation
+        V = data.V
+    else:
+        # Original implementation
+        WD = add_dry_bed_condition(data.WD, previous_t)
+        BC = torch.cat((add_dry_bed_condition(data.BC, previous_t), data.BC[:,-1:]), 1) # Also add the last BC because of mass conservation
+        V = add_dry_bed_condition(data.V, previous_t)
 
     for init_time in range(time_start, time_start+temporal_samples_size):
         temp = Data()
