@@ -16,7 +16,7 @@ from utils.load import read_config
 from utils.visualization import PlotRollout
 from utils.miscellaneous import get_numerical_times, get_speed_up, get_model, SpatialAnalysis, fix_dict_in_config
 from utils.logging_utils import Logger
-from training.train import LightningTrainer, DataModule, CurriculumLearning
+from training.train import LightningTrainer, DataModule, CurriculumLearning, EpochTimerCallback
 from validation.validation_stats import ValidationStats
 
 torch.backends.cudnn.deterministic = True
@@ -96,6 +96,7 @@ def main(config):
                                         save_top_k=1)
     curriculum_callback = CurriculumLearning(max_rollout_steps, patience=5)
     early_stopping      = EarlyStopping('val_CSI_005', mode='max', patience=trainer_options['patience'])
+    epoch_timer_callback = EpochTimerCallback()
     wandb_logger.watch(model, log="all", log_graph=False)
 
     # Load trained model
@@ -117,6 +118,7 @@ def main(config):
                         callbacks=[checkpoint_callback, 
                                 curriculum_callback, 
                                 early_stopping, 
+                                epoch_timer_callback,
                                 ])
     
     # Train and get trained model

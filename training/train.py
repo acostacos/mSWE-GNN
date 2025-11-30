@@ -2,6 +2,7 @@
 import numpy as np
 import torch
 import torch.optim as optim
+import time
 import lightning as L
 from lightning.pytorch.callbacks import Callback, BatchSizeFinder
 from torch_geometric.loader import DataLoader
@@ -257,3 +258,11 @@ class CurriculumBatchSizeFinder(BatchSizeFinder):
         pl_module.rollout_steps = self.max_rollout_steps
         self.scale_batch_size(trainer, pl_module)
         pl_module.rollout_steps = 1
+
+class EpochTimerCallback(Callback):
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.epoch_start_time = time.time()
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        epoch_duration = time.time() - self.epoch_start_time
+        print(f"Epoch {trainer.current_epoch} duration: {epoch_duration:.2f} seconds")
