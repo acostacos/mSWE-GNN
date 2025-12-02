@@ -122,7 +122,14 @@ class LightningTrainer(L.LightningModule):
         self.rollout_steps = 1
         assert self.type_loss in ['RMSE','MAE'], "loss_type must be either 'RMSE' or 'MAE'"        
         self.curriculum_epoch = trainer_options['curriculum_epoch']
-        
+
+    def on_train_start(self):
+        self.start_training_time = time.time()
+
+    def on_train_end(self):
+        total_training_time = time.time() - self.start_training_time
+        self.print(f"Total Training Time: {total_training_time:.4f} seconds", flush=True)
+
     def training_step(self, batch):
         self.log("rollout_steps", torch.tensor(self.rollout_steps, dtype=torch.float32), on_step=False, on_epoch=True, batch_size=self.batch_size)
         temp = adapt_batch_training(batch)
@@ -145,9 +152,13 @@ class LightningTrainer(L.LightningModule):
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=self.batch_size)
         return loss
 
+    def on_train_epoch_start(self):
+        self.print(f"Epoch {self.current_epoch}", flush=True)
+        self.print(f"\tUsing rollout steps: {self.rollout_steps}", flush=True)
+
     def on_train_epoch_end(self):
         avg_loss = self.trainer.callback_metrics.get("train_loss")
-        self.print(f"Epoch {self.current_epoch} - Train Loss: {avg_loss:.4f}", flush=True)
+        self.print(f"\tTrain Loss: {avg_loss:.4f}", flush=True)
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), 
@@ -265,4 +276,4 @@ class EpochTimerCallback(Callback):
 
     def on_train_epoch_end(self, trainer, pl_module):
         epoch_duration = time.time() - self.epoch_start_time
-        print(f"Epoch {trainer.current_epoch} duration: {epoch_duration:.2f} seconds")
+        print(f"\tEpoch {trainer.current_epoch} Duration: {epoch_duration:.2f} seconds")
