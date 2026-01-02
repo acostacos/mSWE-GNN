@@ -203,7 +203,7 @@ def main(config):
             if not os.path.exists(os.path.dirname(save_path)):
                 os.makedirs(os.path.dirname(save_path))
             validation_stats.save_stats(save_path)
-            print('================================')
+            print('================================', flush=True)
 
     # Prediction time
     print(f'Average inference time per dataset: {prediction_times:4f} seconds', flush=True)
