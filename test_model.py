@@ -7,6 +7,7 @@ import lightning as L
 from torch_geometric.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
 
+from argparse import ArgumentParser
 from utils.dataset import create_model_dataset, to_temporal_dataset
 from utils.dataset import get_temporal_test_dataset_parameters
 from utils.load import read_config
@@ -169,8 +170,13 @@ def main(config):
     print('Testing finished!')
 
 if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument('--config', type=str, default='config_finetune.yaml', help='Path to the configuration file.')
+    args = parser.parse_args()
+
     # Read configuration file with parameters
-    cfg = read_config('config_finetune.yaml')
+    print('Reading config file:', args.config)
+    cfg = read_config(args.config)
 
     wandb_logger = WandbLogger(
         mode='disabled',
