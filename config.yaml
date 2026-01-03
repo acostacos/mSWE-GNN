@@ -79,3 +79,25 @@ lr_info:
 #   time_stop   : -1
 
 saved_model: 'results/Pareto_front/models/K4_F64.h5' # specify the model to be tested 
+
+output_paths:
+- 'saved_metrics/mSWEGNN_runid_81_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_82_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_83_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_84_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_85_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_86_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_87_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_88_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_89_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_90_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_91_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_92_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_93_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_94_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_95_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_96_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_97_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_98_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_99_metrics.npz'
+- 'saved_metrics/mSWEGNN_runid_100_metrics.npz'
