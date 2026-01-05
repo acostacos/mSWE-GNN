@@ -107,6 +107,7 @@ def main(config):
     
     if 'saved_model' in config:
         model = plmodule.load_from_checkpoint(config['saved_model'], map_location=device, **plmodule_kwargs)
+        print('Loaded model from checkpoint:', config['saved_model'], flush=True)
 
     # Define trainer
     trainer = L.Trainer(accelerator="auto", devices='auto',
@@ -126,6 +127,7 @@ def main(config):
 
     # Load the best model checkpoint
     plmodule = plmodule.load_from_checkpoint(checkpoint_callback.best_model_path, map_location=device, **plmodule_kwargs)
+    print('Loaded best model from checkpoint:', checkpoint_callback.best_model_path, flush=True)
     model = plmodule.model.to(device)
     
     # validate with trained model
@@ -156,8 +158,7 @@ def main(config):
     WATER_DEPTH_IDX = 0
     CLIP_NEGATIVE_WATER_DEPTH = True
     REMOVE_GHOST_NODES = True
-    START_GHOST_NODE_IDX = 1126 # for HEC-RAS dataset
-    NUM_TS_GT_PAD = 1 # Num timesteps of ground truth to be added at start; Used to balance rollout length with other compared models
+    NUM_TS_GT_PAD = None # Num timesteps of ground truth to be added at start; Used to balance rollout length with other compared models
     CSI_THRESHOLD = 0.05
 
     output_paths = config.get('output_paths', None)
@@ -181,8 +182,12 @@ def main(config):
                 real_rollout = torch.cat([gt_pad, real_rollout], dim=-1)
             
             if REMOVE_GHOST_NODES:
-                pred_rollout = pred_rollout[:START_GHOST_NODE_IDX, :]
-                real_rollout = real_rollout[:START_GHOST_NODE_IDX, :]
+                ghost_nodes = test_dataset[dataset_idx].node_BC
+                ghost_node_mask = torch.ones(real_rollout.shape[0], dtype=torch.bool)
+                ghost_node_mask[ghost_nodes] = False
+
+                pred_rollout = pred_rollout[ghost_node_mask, :]
+                real_rollout = real_rollout[ghost_node_mask, :]
 
             for i in range(pred_rollout.shape[-1]):
                 water_depth_pred = pred_rollout[:, i].unsqueeze(-1)

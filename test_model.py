@@ -98,8 +98,7 @@ def main(config):
     # ===================== Validation statistics ====================
     WATER_DEPTH_IDX = 0
     CLIP_NEGATIVE_WATER_DEPTH = True
-    REMOVE_GHOST_NODES = False
-    START_GHOST_NODE_IDX = None
+    REMOVE_GHOST_NODES = True
     NUM_TS_GT_PAD = None # Num timesteps of ground truth to be added at start; Used to balance rollout length with other compared models
     CSI_THRESHOLD = 0.05
 
@@ -125,8 +124,12 @@ def main(config):
                 real_rollout = torch.cat([gt_pad, real_rollout], dim=-1)
             
             if REMOVE_GHOST_NODES:
-                pred_rollout = pred_rollout[:START_GHOST_NODE_IDX, :]
-                real_rollout = real_rollout[:START_GHOST_NODE_IDX, :]
+                ghost_nodes = test_dataset[dataset_idx].node_BC
+                ghost_node_mask = torch.ones(real_rollout.shape[0], dtype=torch.bool)
+                ghost_node_mask[ghost_nodes] = False
+
+                pred_rollout = pred_rollout[ghost_node_mask, :]
+                real_rollout = real_rollout[ghost_node_mask, :]
 
             for i in range(pred_rollout.shape[-1]):
                 water_depth_pred = pred_rollout[:, i].unsqueeze(-1)
