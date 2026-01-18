@@ -159,7 +159,9 @@ def main(config):
 
     rollout_loss = spatial_analyser._get_rollout_loss(type_loss='RMSE')
     model_times = spatial_analyser.prediction_times
-                                        
+
+    print('Prediction time per sample:', prediction_times)
+
     print('test roll loss WD:',rollout_loss.mean(0)[0].item())
     print('test roll loss V:',rollout_loss.mean(0)[1:].mean().item())
 
