@@ -1,4 +1,3 @@
-
 #!/bin/sh
 #SBATCH --job-name=mswe_gnn_test
 #SBATCH --mail-type=BEGIN,END,FAIL
