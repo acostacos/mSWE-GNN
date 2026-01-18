@@ -15,3 +15,5 @@ srun python test_model.py --config 'configs/hecras_config.yaml'
 echo "========== Original Data =========="
 srun python test_model.py --config 'config.yaml'
 
+echo "========== Dike Ring 15 Data =========="
+srun python test_model.py --config 'config_finetune.yaml'
